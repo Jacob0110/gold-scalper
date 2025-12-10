@@ -1,11 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createChart, ColorType, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
-import { createClient } from '@supabase/supabase-js'; // [V20.0] Import Supabase
+import { createClient } from '@supabase/supabase-js';
 
-// --- [V20.0] Supabase Config ---
-// ⚠️ REPLACE THESE WITH YOUR ACTUAL KEYS FROM SUPABASE DASHBOARD
-const SUPABASE_URL = 'https://iiteqpbtsssvrlpuxppj.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlpdGVxcGJ0c3NzdnJscHV4cHBqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUzNTYzMTgsImV4cCI6MjA4MDkzMjMxOH0.fzHqf_kiP7Ba8A7q4zo4hL4I4nILXX-imAhatZZdS1k';
+// --- [V21.0] Supabase Config ---
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_KEY = 'YOUR_SUPABASE_ANON_KEY';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // --- Config ---
@@ -17,7 +16,7 @@ const STRATEGY = {
   ENTRY_PULLBACK: 0.02
 };
 
-// --- Helpers ---
+// --- Helpers (Unchanged) ---
 const calculateRSI = (prices, period=14) => {
   if (!prices || prices.length < period + 1) return 50;
   let gains = 0, losses = 0;
@@ -73,7 +72,7 @@ export default function App() {
   
   const [marketData, setMarketData] = useState({ price: 0, rsi: 0, volFactor: "0.00", ema: 0, macdHist: 0, atr: 0, support: 0, resistance: 0 });
   const [activeSignal, setActiveSignal] = useState(null); 
-  const [tradeHistory, setTradeHistory] = useState([]); // Now loaded from Supabase
+  const [tradeHistory, setTradeHistory] = useState([]); 
   const [connectionStatus, setConnectionStatus] = useState('連線中...');
   const [strategyTip, setStrategyTip] = useState("等待數據...");
   const [tradeSetup, setTradeSetup] = useState(null);
@@ -96,9 +95,8 @@ export default function App() {
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V20.0 Cloud"; }, []);
+  useEffect(() => { document.title = "Jinguo Scalper V21.0"; }, []);
 
-  // [V20.0] Fetch History from Supabase on Load
   useEffect(() => {
     const fetchHistory = async () => {
         const { data, error } = await supabase
@@ -106,9 +104,7 @@ export default function App() {
             .select('*')
             .order('entry_time', { ascending: false })
             .limit(100);
-        
         if (data) {
-            // Map DB fields to App format
             const mapped = data.map(d => ({
                 status: d.status,
                 price: d.entry_price,
@@ -121,22 +117,16 @@ export default function App() {
         }
     };
     fetchHistory();
-    
-    // Subscribe to realtime changes (if other devices update DB)
     const channel = supabase.channel('trades_realtime')
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, payload => {
-            fetchHistory(); // Refresh list on new trade
-        })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, payload => { fetchHistory(); })
         .subscribe();
-        
     return () => { supabase.removeChannel(channel); };
   }, []);
 
-  // [V20.0] Save Trade to Supabase
   const recordTrade = async (signal, resultStatus, exitPrice, candleTime) => {
-      const { error } = await supabase.from('trades').insert({
+      await supabase.from('trades').insert({
           type: signal.type,
-          status: resultStatus, // 'WIN' or 'LOSS'
+          status: resultStatus,
           entry_price: signal.price,
           exit_price: exitPrice,
           tp: signal.tp,
@@ -144,7 +134,6 @@ export default function App() {
           entry_time: new Date(signal.timestamp).toISOString(),
           exit_time: new Date(candleTime * 1000).toISOString()
       });
-      if(error) console.error("DB Save Error:", error);
   };
 
   useEffect(() => {
@@ -204,6 +193,10 @@ export default function App() {
             updateSupportResistance(candleSeriesRef.current, hist);
             setConnectionStatus('ONLINE');
 
+            // [V21.0] Set Initial Zoom to 2 Hours
+            const now = hist[hist.length-1].time;
+            chart.timeScale().setVisibleRange({ from: now - (2 * 60 * 60), to: now + (10 * 60) });
+
             const ws = new WebSocket('wss://stream.binance.com:9443/ws/paxgusdt@kline_1m');
             ws.onmessage = (e) => {
                 const k = JSON.parse(e.data).k;
@@ -233,13 +226,12 @@ export default function App() {
                 if (activeSignalRef.current) {
                     const signal = activeSignalRef.current;
                     const elapsedMin = (Date.now() - signal.timestamp) / 60000;
-                    
                     if (candle.high >= signal.tp) {
-                        recordTrade(signal, 'WIN', signal.tp, candle.time); // Save to DB
+                        recordTrade(signal, 'WIN', signal.tp, candle.time); 
                         setActiveSignal(null);
                         activeSignalRef.current = null;
                     } else if (candle.low <= signal.sl) {
-                        recordTrade(signal, 'LOSS', signal.sl, candle.time); // Save to DB
+                        recordTrade(signal, 'LOSS', signal.sl, candle.time); 
                         setActiveSignal(null);
                         activeSignalRef.current = null;
                     } else if (elapsedMin > 15) {
@@ -319,10 +311,9 @@ export default function App() {
       { label: '1D', val: 1440 }, { label: '1W', val: 10080 }, { label: '1M', val: 43200 }, { label: 'All', val: 0 }
   ];
 
-  // [V20.0] Clear History (Optional - for DB you might want to protect this)
   const clearHistory = async () => {
       if (window.confirm('確定要清除所有交易記錄？這會清空數據庫！')) {
-          await supabase.from('trades').delete().neq('id', 0); // Delete all
+          await supabase.from('trades').delete().neq('id', 0); 
           setTradeHistory([]);
       }
   };
@@ -415,12 +406,17 @@ export default function App() {
           </div>
       )}
 
+      {/* [V21.0] Redesigned Grid Layout */}
       <div style={styles.grid}>
+        {/* Row 1: Main Indicators */}
         <StatCard label="現價" value={marketData.price.toFixed(2)} unit="$" color="#FFFFFF" isMain={true} />
-        <StatCard label="支撐 (Low 50)" value={marketData.support?.toFixed(2) || "---"} unit="$" color="#22c55e" sub="Support" />
-        <StatCard label="阻力 (High 50)" value={marketData.resistance?.toFixed(2) || "---"} unit="$" color="#ef4444" sub="Resist" />
+        <StatCard label="RSI (14)" value={marketData.rsi || 0} color={rs.c} sub={rs.t} />
         <StatCard label="成交倍數" value={marketData.volFactor || "0.00"} unit="x" color={parseFloat(marketData.volFactor)>1.5?'#4ade80':'#94a3b8'} sub={parseFloat(marketData.volFactor)>1.5?"🚀 爆量":"💤 縮量"} />
         <StatCard label="EMA (20)" value={marketData.ema || 0} unit="$" color="#fbbf24" sub="Trend" />
+
+        {/* Row 2: SR Lines (Visual distinction) */}
+        <StatCard label="支撐 (Low 50)" value={marketData.support?.toFixed(2) || "---"} unit="$" color="#22c55e" sub="Strong Support" />
+        <StatCard label="阻力 (High 50)" value={marketData.resistance?.toFixed(2) || "---"} unit="$" color="#ef4444" sub="Key Resistance" />
       </div>
 
       {activeSignal && (
@@ -474,7 +470,10 @@ const styles = {
     settingsBtn: { background:'#27272a', color:'#fff', border:'none', padding:'8px 15px', borderRadius:'4px', cursor:'pointer', fontWeight:'bold' },
     settingsPanel: { background:'#18181b', padding:'15px', borderRadius:'8px', marginBottom:'15px', border:'1px solid #3f3f46' },
     input: { background:'#000', border:'1px solid #3f3f46', color:'#fff', padding:'5px', borderRadius:'4px', marginLeft:'5px', width:'60px' },
-    grid: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))', gap:'15px', marginBottom:'15px', flexShrink:0 },
+    
+    // [V21.0] UX Optimization: 2-Row Grid
+    grid: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(140px, 1fr))', gap:'10px', marginBottom:'15px', flexShrink:0 },
+    
     alertBox: { padding:'15px 20px', borderRadius:'8px', marginBottom:'15px', fontWeight:'bold', width:'100%', boxSizing:'border-box', flexShrink:0 },
     tipBar: { background:'#1e293b', borderLeft:'4px solid #3b82f6', padding:'10px 15px', borderRadius:'4px', fontSize:'0.9rem', color:'#94a3b8', flexGrow:1, display:'flex', alignItems:'center' },
     setupBox: { background:'#18181b', border:'1px solid #27272a', borderRadius:'4px', padding:'10px 15px', flexGrow:1.5 },
