@@ -54,6 +54,13 @@ const calculateATR = (h, l, c, p) => {
 
 const formatHKTime = (ts) => new Date(ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Hong_Kong'});
 
+// [V16.0] Date Input Helper
+const toInputFormat = (ts) => {
+    const d = new Date(ts);
+    // Format: YYYY-MM-DDTHH:MM
+    return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
+};
+
 export default function App() {
   const chartContainerRef = useRef(null);
   const chartInstanceRef = useRef(null);
@@ -69,8 +76,12 @@ export default function App() {
   const [capital, setCapital] = useState(10000); 
   const [riskPct, setRiskPct] = useState(2);     
   const [showSettings, setShowSettings] = useState(false);
-  const [showHistory, setShowHistory] = useState(false); // [V15.0] Toggle History Panel
-  const [filterPeriod, setFilterPeriod] = useState(0);   // [V15.0] 0:All, 60:1H, 240:4H
+  const [showHistory, setShowHistory] = useState(false); 
+  
+  // [V16.0] Filter State
+  const [filterMode, setFilterMode] = useState('preset'); // 'preset' or 'custom'
+  const [presetPeriod, setPresetPeriod] = useState(0); // 0:All, 30, 60, 240, 1440, 10080, 43200
+  const [customRange, setCustomRange] = useState({ start: Date.now() - 86400000, end: Date.now() }); // Default last 24h
 
   const candlesRef = useRef([]); 
   const candleSeriesRef = useRef(null);
@@ -80,19 +91,17 @@ export default function App() {
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V15.0"; }, []);
+  useEffect(() => { document.title = "Jinguo Scalper V16.0"; }, []);
 
-  // [V15.0] Update Chart Markers based on Trade History
   useEffect(() => {
       if(candleSeriesRef.current && tradeHistory.length > 0) {
           const markers = tradeHistory.map(t => ({
-              time: t.entryTimeRaw, // Need raw timestamp for markers
+              time: t.entryTimeRaw, 
               position: t.status === 'WIN' ? 'belowBar' : 'aboveBar',
               color: t.status === 'WIN' ? '#4ade80' : '#ef4444',
               shape: t.status === 'WIN' ? 'arrowUp' : 'arrowDown',
               text: t.status === 'WIN' ? 'WIN' : 'LOSS',
           }));
-          // Sort markers by time as required by lightweight-charts
           markers.sort((a,b) => a.time - b.time);
           candleSeriesRef.current.setMarkers(markers);
       }
@@ -235,16 +244,26 @@ export default function App() {
   const rs = rsiStat(marketData.rsi);
   const riskAmt = (capital * (riskPct/100)).toFixed(0);
 
-  // Filter Logic
+  // [V16.0] Enhanced Filter Logic
   const filteredHistory = tradeHistory.filter(t => {
-      if (filterPeriod === 0) return true;
-      const elapsed = (Date.now() - t.timestamp) / (1000 * 60); // minutes
-      return elapsed <= filterPeriod;
+      if (filterMode === 'preset') {
+          if (presetPeriod === 0) return true;
+          const elapsedMin = (Date.now() - t.timestamp) / (1000 * 60);
+          return elapsedMin <= presetPeriod;
+      } else {
+          return t.timestamp >= customRange.start && t.timestamp <= customRange.end;
+      }
   });
 
   const wins = filteredHistory.filter(t => t.status === 'WIN').length;
   const losses = filteredHistory.filter(t => t.status === 'LOSS').length;
   const winRate = (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : 0;
+
+  // Preset buttons
+  const presets = [
+      { label: '30M', val: 30 }, { label: '1H', val: 60 }, { label: '4H', val: 240 },
+      { label: '1D', val: 1440 }, { label: '1W', val: 10080 }, { label: '1M', val: 43200 }, { label: 'All', val: 0 }
+  ];
 
   return (
     <div style={styles.container}>
@@ -253,14 +272,17 @@ export default function App() {
       <div style={styles.header}>
         <div style={styles.statusDot} className={connectionStatus==='ONLINE'?'pulse':''}></div>
         <div style={{flexGrow:1}}>
-            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V15.0</span></h1>
+            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V16.0</span></h1>
             <p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus}</p>
         </div>
         
         {/* Stats Pill */}
         <div style={{display:'flex', gap:'10px', marginRight:'15px', alignItems:'center'}}>
              <div onClick={()=>setShowHistory(!showHistory)} style={{cursor:'pointer', background:'#27272a', padding:'5px 15px', borderRadius:'4px', border:'1px solid #3f3f46', fontSize:'0.9rem', color:'#fff'}}>
-                 {filterPeriod===0?'All Time':(filterPeriod===60?'Last 1H':'Last 4H')} Result: <span style={{color:winRate>=50?'#4ade80':'#ef4444', fontWeight:'bold'}}>{winRate}% ({wins}W-{losses}L)</span>
+                 <span style={{color:'#94a3b8', marginRight:'5px'}}>
+                     {filterMode==='preset' ? (presets.find(p=>p.val===presetPeriod)?.label + ' Result:') : 'Custom Result:'}
+                 </span>
+                 <span style={{color:winRate>=50?'#4ade80':'#ef4444', fontWeight:'bold'}}>{winRate}% ({wins}W-{losses}L)</span>
              </div>
         </div>
         <button onClick={()=>setShowSettings(!showSettings)} style={styles.settingsBtn}>⚙️</button>
@@ -276,18 +298,45 @@ export default function App() {
           </div>
       )}
 
-      {/* [V15.0] History Panel Overlay */}
+      {/* [V16.0] History Panel with Custom Range */}
       {showHistory && (
           <div style={styles.historyPanel}>
-              <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px', borderBottom:'1px solid #3f3f46', paddingBottom:'5px'}}>
-                  <strong>交易記錄</strong>
-                  <div style={{display:'flex', gap:'5px'}}>
-                      <button onClick={()=>setFilterPeriod(60)} style={filterPeriod===60?styles.filterBtnActive:styles.filterBtn}>1H</button>
-                      <button onClick={()=>setFilterPeriod(240)} style={filterPeriod===240?styles.filterBtnActive:styles.filterBtn}>4H</button>
-                      <button onClick={()=>setFilterPeriod(0)} style={filterPeriod===0?styles.filterBtnActive:styles.filterBtn}>ALL</button>
+              <div style={{borderBottom:'1px solid #3f3f46', paddingBottom:'10px', marginBottom:'10px'}}>
+                  <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px'}}>
+                      <strong>交易記錄</strong>
+                      <button onClick={()=>setFilterMode(filterMode==='preset'?'custom':'preset')} style={styles.toggleBtn}>
+                          {filterMode==='preset' ? '切換自定義' : '切換預設'}
+                      </button>
                   </div>
+
+                  {filterMode === 'preset' ? (
+                      <div style={{display:'flex', gap:'5px', flexWrap:'wrap'}}>
+                          {presets.map(p => (
+                              <button key={p.label} onClick={()=>setPresetPeriod(p.val)} 
+                                  style={presetPeriod===p.val?styles.filterBtnActive:styles.filterBtn}>
+                                  {p.label}
+                              </button>
+                          ))}
+                      </div>
+                  ) : (
+                      <div style={{display:'flex', flexDirection:'column', gap:'5px'}}>
+                          <div style={{display:'flex', alignItems:'center', justifyContent:'space-between'}}>
+                              <span style={{fontSize:'0.8rem', color:'#94a3b8'}}>From:</span>
+                              <input type="datetime-local" style={styles.dateInput} 
+                                  value={toInputFormat(customRange.start)}
+                                  onChange={e=>setCustomRange({...customRange, start: new Date(e.target.value).getTime()})} />
+                          </div>
+                          <div style={{display:'flex', alignItems:'center', justifyContent:'space-between'}}>
+                              <span style={{fontSize:'0.8rem', color:'#94a3b8'}}>To:</span>
+                              <input type="datetime-local" style={styles.dateInput}
+                                  value={toInputFormat(customRange.end)}
+                                  onChange={e=>setCustomRange({...customRange, end: new Date(e.target.value).getTime()})} />
+                          </div>
+                      </div>
+                  )}
               </div>
-              <div style={{maxHeight:'200px', overflowY:'auto'}}>
+              
+              <div style={{maxHeight:'300px', overflowY:'auto'}}>
                   {filteredHistory.length === 0 ? <div style={{color:'#71717a', textAlign:'center', padding:'20px'}}>暫無記錄</div> : 
                    filteredHistory.map((t, i) => (
                       <div key={i} style={{display:'flex', justifyContent:'space-between', fontSize:'0.85rem', padding:'8px 0', borderBottom:'1px solid #27272a'}}>
@@ -371,9 +420,11 @@ const styles = {
     chartWrapper: { flexGrow:1, width:'100%', position:'relative', background:'#000', border:'2px solid #27272a', borderRadius:'8px', overflow:'hidden' },
     chartContainer: { width:'100%', height:'100%' },
     closeBtn: { background:'rgba(0,0,0,0.2)', border:'none', cursor:'pointer', padding:'2px 8px', borderRadius:'4px', fontWeight:'bold'},
-    historyPanel: { position:'absolute', top:'80px', right:'20px', width:'300px', background:'#18181b', border:'1px solid #3f3f46', borderRadius:'8px', padding:'15px', zIndex:100, boxShadow:'0 10px 25px rgba(0,0,0,0.5)'},
-    filterBtn: { background:'transparent', color:'#71717a', border:'none', cursor:'pointer', fontSize:'0.8rem' },
-    filterBtnActive: { background:'#27272a', color:'#fff', border:'none', cursor:'pointer', fontSize:'0.8rem', borderRadius:'4px', padding:'2px 6px' }
+    historyPanel: { position:'absolute', top:'80px', right:'20px', width:'320px', background:'#18181b', border:'1px solid #3f3f46', borderRadius:'8px', padding:'15px', zIndex:100, boxShadow:'0 10px 25px rgba(0,0,0,0.5)'},
+    filterBtn: { background:'transparent', color:'#71717a', border:'1px solid #27272a', cursor:'pointer', fontSize:'0.75rem', borderRadius:'4px', padding:'4px 8px', minWidth:'40px' },
+    filterBtnActive: { background:'#3b82f6', color:'#fff', border:'1px solid #3b82f6', cursor:'pointer', fontSize:'0.75rem', borderRadius:'4px', padding:'4px 8px', minWidth:'40px', fontWeight:'bold' },
+    toggleBtn: { background:'transparent', color:'#3b82f6', border:'none', cursor:'pointer', fontSize:'0.8rem', textDecoration:'underline' },
+    dateInput: { background:'#000', border:'1px solid #3f3f46', color:'#fff', padding:'5px', borderRadius:'4px', fontSize:'0.8rem' }
 };
 
 function StatCard({ label, value, unit, color, sub, isMain }) {
