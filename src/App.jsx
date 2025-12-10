@@ -1,22 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createChart, ColorType, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
-import { createClient } from '@supabase/supabase-js';
+import { CONFIG } from './config'; 
 
-// --- [V21.0] Supabase Config ---
-const SUPABASE_URL = 'YOUR_SUPABASE_URL';
-const SUPABASE_KEY = 'YOUR_SUPABASE_ANON_KEY';
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// --- Supabase Init (CDN Mode) ---
+// 使用 window.supabase 避免 Vite/tslib 依賴地獄
+const { createClient } = window.supabase || { createClient: () => null };
+const supabase = window.supabase ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY) : null;
+const STRATEGY = CONFIG.STRATEGY;
 
-// --- Config ---
-const STRATEGY = {
-  RSI_PERIOD: 14, VOL_MA_PERIOD: 20, EMA_PERIOD: 20,
-  MACD_FAST: 12, MACD_SLOW: 26, MACD_SIGNAL: 9, 
-  RSI_THRESHOLD: 55, RSI_OVERBOUGHT: 80, VOL_MULTIPLIER: 1.5, ATR_PERIOD: 14,
-  LOOKBACK_PERIOD: 50,
-  ENTRY_PULLBACK: 0.02
-};
-
-// --- Helpers (Unchanged) ---
+// --- Helpers ---
 const calculateRSI = (prices, period=14) => {
   if (!prices || prices.length < period + 1) return 50;
   let gains = 0, losses = 0;
@@ -76,6 +68,7 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState('連線中...');
   const [strategyTip, setStrategyTip] = useState("等待數據...");
   const [tradeSetup, setTradeSetup] = useState(null);
+  const [chartReady, setChartReady] = useState(false);
   
   const [capital, setCapital] = useState(1000); 
   const [riskPct, setRiskPct] = useState(2);     
@@ -95,9 +88,11 @@ export default function App() {
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V21.0"; }, []);
+  useEffect(() => { document.title = "Jinguo Scalper V23.0"; }, []);
 
+  // --- Supabase Data Loading ---
   useEffect(() => {
+    if(!supabase) return;
     const fetchHistory = async () => {
         const { data, error } = await supabase
             .from('trades')
@@ -124,6 +119,7 @@ export default function App() {
   }, []);
 
   const recordTrade = async (signal, resultStatus, exitPrice, candleTime) => {
+      if(!supabase) return;
       await supabase.from('trades').insert({
           type: signal.type,
           status: resultStatus,
@@ -136,19 +132,24 @@ export default function App() {
       });
   };
 
+  // --- Marker Effect (Safe Update) ---
   useEffect(() => {
-      if(candleSeriesRef.current && tradeHistory.length > 0) {
-          const markers = tradeHistory.map(t => ({
-              time: t.entryTimeRaw, 
-              position: t.status === 'WIN' ? 'belowBar' : 'aboveBar',
-              color: t.status === 'WIN' ? '#4ade80' : '#ef4444',
-              shape: t.status === 'WIN' ? 'arrowUp' : 'arrowDown',
-              text: t.status === 'WIN' ? 'WIN' : 'LOSS',
-          }));
-          markers.sort((a,b) => a.time - b.time);
-          candleSeriesRef.current.setMarkers(markers);
+      if(chartReady && candleSeriesRef.current && tradeHistory.length > 0) {
+          try {
+              const markers = tradeHistory.map(t => ({
+                  time: t.entryTimeRaw, 
+                  position: t.status === 'WIN' ? 'belowBar' : 'aboveBar',
+                  color: t.status === 'WIN' ? '#4ade80' : '#ef4444',
+                  shape: t.status === 'WIN' ? 'arrowUp' : 'arrowDown',
+                  text: t.status === 'WIN' ? 'WIN' : 'LOSS',
+              }));
+              markers.sort((a,b) => a.time - b.time);
+              if (typeof candleSeriesRef.current.setMarkers === 'function') {
+                  candleSeriesRef.current.setMarkers(markers);
+              }
+          } catch (e) { console.warn("Marker update skipped"); }
       }
-  }, [tradeHistory]);
+  }, [tradeHistory, chartReady]);
 
   const updateSupportResistance = (series, candles) => {
       if (!series || candles.length < STRATEGY.LOOKBACK_PERIOD) return;
@@ -164,8 +165,11 @@ export default function App() {
       return { low, high };
   };
 
+  // --- Chart & WebSocket Logic ---
   useEffect(() => {
-    if (!chartContainerRef.current || chartInstanceRef.current) return;
+    if (!chartContainerRef.current) return;
+    if(chartInstanceRef.current) { chartInstanceRef.current.remove(); chartInstanceRef.current = null; }
+
     const chart = createChart(chartContainerRef.current, {
         layout: { background: { type: ColorType.Solid, color: '#09090b' }, textColor: '#A1A1AA', fontFamily: "'Roboto Mono', monospace" },
         grid: { vertLines: { color: '#18181b' }, horzLines: { color: '#18181b' } },
@@ -186,32 +190,45 @@ export default function App() {
             const raw = await res.json();
             const hist = raw.map(d => ({ time: d[0]/1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5]) }));
             candlesRef.current = hist;
-            candleSeriesRef.current.setData(hist);
-            volumeSeriesRef.current.setData(hist.map(d => ({ time: d.time, value: d.volume, color: d.close >= d.open ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)' })));
+            
+            if(candleSeriesRef.current) {
+                candleSeriesRef.current.setData(hist);
+                setChartReady(true);
+            }
+            if(volumeSeriesRef.current) volumeSeriesRef.current.setData(hist.map(d => ({ time: d.time, value: d.volume, color: d.close >= d.open ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)' })));
+            
             const emaData = calculateEMA(hist.map(d=>d.close), STRATEGY.EMA_PERIOD);
-            emaSeriesRef.current.setData(hist.map((d,i)=>({time:d.time, value:emaData[i]})).filter(d=>d.value!=null));
+            if(emaSeriesRef.current) emaSeriesRef.current.setData(hist.map((d,i)=>({time:d.time, value:emaData[i]})).filter(d=>d.value!=null));
+            
             updateSupportResistance(candleSeriesRef.current, hist);
             setConnectionStatus('ONLINE');
 
-            // [V21.0] Set Initial Zoom to 2 Hours
+            // [Initial Zoom] Force 2-hour window
             const now = hist[hist.length-1].time;
-            chart.timeScale().setVisibleRange({ from: now - (2 * 60 * 60), to: now + (10 * 60) });
+            // chart.timeScale().setVisibleRange({ from: now - (2 * 60 * 60), to: now + (10 * 60) });
+            chart.timeScale().setVisibleRange({ 
+                from: now - (STRATEGY.DEFAULT_ZOOM_HOURS * 3600), 
+                to: now + (10 * 60) 
+            });
+
 
             const ws = new WebSocket('wss://stream.binance.com:9443/ws/paxgusdt@kline_1m');
             ws.onmessage = (e) => {
                 const k = JSON.parse(e.data).k;
                 const candle = { time: k.t/1000, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c), volume: parseFloat(k.v) };
+                
                 if (candleSeriesRef.current) candleSeriesRef.current.update(candle);
                 if (volumeSeriesRef.current) volumeSeriesRef.current.update({ time: candle.time, value: candle.volume, color: candle.close>=candle.open?'rgba(34, 197, 94, 0.5)':'rgba(239, 68, 68, 0.5)'});
 
                 let h = candlesRef.current;
                 let ch = [...h];
                 if (ch[ch.length-1] && ch[ch.length-1].time===candle.time) ch[ch.length-1]=candle; else ch.push(candle);
+                candlesRef.current = ch; // Update ref for next cycle
                 
                 const closes = ch.map(c=>c.close);
                 const fullEMA = calculateEMA(closes, STRATEGY.EMA_PERIOD);
                 const curEMA = fullEMA[fullEMA.length-1];
-                if (curEMA) emaSeriesRef.current.update({time:candle.time, value:curEMA});
+                if (curEMA && emaSeriesRef.current) emaSeriesRef.current.update({time:candle.time, value:curEMA});
 
                 const srLevels = updateSupportResistance(candleSeriesRef.current, ch);
 
@@ -223,6 +240,17 @@ export default function App() {
 
                 setMarketData({ price: candle.close, rsi: rsi.toFixed(1), volFactor, ema: curEMA?curEMA.toFixed(2):0, macdHist: macd.hist, atr, support: srLevels?.low, resistance: srLevels?.high });
 
+                // [Zoom Fix] Keep forcing the 2-hour window on every update to prevent expansion
+                if(chartInstanceRef.current) {
+                    const currentNow = candle.time;
+                    // chartInstanceRef.current.timeScale().setVisibleRange({ from: currentNow - (2 * 60 * 60), to: currentNow + (10 * 60) });
+                    chartInstanceRef.current.timeScale().setVisibleRange({ 
+                        from: currentNow - (STRATEGY.DEFAULT_ZOOM_HOURS * 3600), 
+                        to: currentNow + (10 * 60) 
+                    });
+                }
+
+                // Trading Logic
                 if (activeSignalRef.current) {
                     const signal = activeSignalRef.current;
                     const elapsedMin = (Date.now() - signal.timestamp) / 60000;
@@ -267,7 +295,8 @@ export default function App() {
                 setTradeSetup(setup);
 
                 if (k.x) {
-                    h.push(candle); if (h.length>500) h.shift(); candlesRef.current=h;
+                    // New Candle Closed logic handled by `ch` logic above, 
+                    // Signal trigger logic:
                     if (!activeSignalRef.current && rsi>STRATEGY.RSI_THRESHOLD && rsi<STRATEGY.RSI_OVERBOUGHT && candle.volume>volSMA*STRATEGY.VOL_MULTIPLIER && macd.hist>0) {
                         const newSignal = { 
                             type: '🚀 爆升突破', variant: 'success', price: candle.close, time: formatHKTime(candle.time), reason: `Vol ${volFactor}x`,
@@ -282,9 +311,27 @@ export default function App() {
         } catch (e) { setConnectionStatus('Err'); }
     };
     const wsPromise = initDataStream();
-    const ro = new ResizeObserver(e => { if(e[0].contentRect) { chart.applyOptions({width:e[0].contentRect.width, height:e[0].contentRect.height}); setTimeout(()=>chart.timeScale().fitContent(),0); }});
+    
+    // [V23.0 Fix] Don't call fitContent in observer to avoid override
+    const ro = new ResizeObserver(e => { 
+        if(e[0].contentRect && chartInstanceRef.current) { 
+            chartInstanceRef.current.applyOptions({
+                width:e[0].contentRect.width, 
+                height:e[0].contentRect.height
+            }); 
+            // Removed chart.timeScale().fitContent() 
+        }
+    });
     ro.observe(chartContainerRef.current);
-    return () => { wsPromise.then(w=>w&&w.close()); chart.remove(); ro.disconnect(); chartInstanceRef.current=null; };
+    
+    return () => { 
+        setChartReady(false); 
+        wsPromise.then(w=>w&&w.close()); 
+        if(chartInstanceRef.current) chartInstanceRef.current.remove(); 
+        ro.disconnect(); 
+        chartInstanceRef.current=null;
+        candleSeriesRef.current=null; 
+    };
   }, [capital, riskPct, leverage]);
 
   const rsiStat = (r) => r>=80 ? {c:'#ef4444',t:'⚠️ 危險'} : (r>=55 ? {c:'#4ade80',t:'🚀 強勢'} : {c:'#94a3b8',t:'⚪ 弱勢'});
@@ -312,6 +359,7 @@ export default function App() {
   ];
 
   const clearHistory = async () => {
+      if(!supabase) return;
       if (window.confirm('確定要清除所有交易記錄？這會清空數據庫！')) {
           await supabase.from('trades').delete().neq('id', 0); 
           setTradeHistory([]);
@@ -326,7 +374,7 @@ export default function App() {
         <div style={styles.statusDot} className={connectionStatus==='ONLINE'?'pulse':''}></div>
         <div style={{flexGrow:1}}>
             <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>CLOUD</span></h1>
-            <p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus} • DB Connected</p>
+            <p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus} • {supabase ? "DB Connected" : "DB Missing"}</p>
         </div>
         
         <div style={{display:'flex', gap:'10px', marginRight:'15px', alignItems:'center'}}>
@@ -406,15 +454,16 @@ export default function App() {
           </div>
       )}
 
-      {/* [V21.0] Redesigned Grid Layout */}
-      <div style={styles.grid}>
-        {/* Row 1: Main Indicators */}
+      {/* Grid Layout Row 1: Main Stats */}
+      <div style={styles.gridRow1}>
         <StatCard label="現價" value={marketData.price.toFixed(2)} unit="$" color="#FFFFFF" isMain={true} />
         <StatCard label="RSI (14)" value={marketData.rsi || 0} color={rs.c} sub={rs.t} />
         <StatCard label="成交倍數" value={marketData.volFactor || "0.00"} unit="x" color={parseFloat(marketData.volFactor)>1.5?'#4ade80':'#94a3b8'} sub={parseFloat(marketData.volFactor)>1.5?"🚀 爆量":"💤 縮量"} />
         <StatCard label="EMA (20)" value={marketData.ema || 0} unit="$" color="#fbbf24" sub="Trend" />
-
-        {/* Row 2: SR Lines (Visual distinction) */}
+      </div>
+      
+      {/* Grid Layout Row 2: SR Levels */}
+      <div style={styles.gridRow2}>
         <StatCard label="支撐 (Low 50)" value={marketData.support?.toFixed(2) || "---"} unit="$" color="#22c55e" sub="Strong Support" />
         <StatCard label="阻力 (High 50)" value={marketData.resistance?.toFixed(2) || "---"} unit="$" color="#ef4444" sub="Key Resistance" />
       </div>
@@ -471,8 +520,9 @@ const styles = {
     settingsPanel: { background:'#18181b', padding:'15px', borderRadius:'8px', marginBottom:'15px', border:'1px solid #3f3f46' },
     input: { background:'#000', border:'1px solid #3f3f46', color:'#fff', padding:'5px', borderRadius:'4px', marginLeft:'5px', width:'60px' },
     
-    // [V21.0] UX Optimization: 2-Row Grid
-    grid: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(140px, 1fr))', gap:'10px', marginBottom:'15px', flexShrink:0 },
+    // Explicit Grid Rows
+    gridRow1: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(140px, 1fr))', gap:'10px', marginBottom:'10px', flexShrink:0 },
+    gridRow2: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(140px, 1fr))', gap:'10px', marginBottom:'15px', flexShrink:0 },
     
     alertBox: { padding:'15px 20px', borderRadius:'8px', marginBottom:'15px', fontWeight:'bold', width:'100%', boxSizing:'border-box', flexShrink:0 },
     tipBar: { background:'#1e293b', borderLeft:'4px solid #3b82f6', padding:'10px 15px', borderRadius:'4px', fontSize:'0.9rem', color:'#94a3b8', flexGrow:1, display:'flex', alignItems:'center' },
