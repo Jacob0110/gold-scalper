@@ -6,10 +6,11 @@ const STRATEGY = {
   RSI_PERIOD: 14, VOL_MA_PERIOD: 20, EMA_PERIOD: 20,
   MACD_FAST: 12, MACD_SLOW: 26, MACD_SIGNAL: 9, 
   RSI_THRESHOLD: 55, RSI_OVERBOUGHT: 80, VOL_MULTIPLIER: 1.5, ATR_PERIOD: 14,
-  LOOKBACK_PERIOD: 50
+  LOOKBACK_PERIOD: 50,
+  ENTRY_PULLBACK: 0.02 // [V18.0] % pullback from high for limit buy
 };
 
-// --- Helpers ---
+// --- Helpers (Same as before) ---
 const calculateRSI = (prices, period=14) => {
   if (!prices || prices.length < period + 1) return 50;
   let gains = 0, losses = 0;
@@ -54,10 +55,8 @@ const calculateATR = (h, l, c, p) => {
 
 const formatHKTime = (ts) => new Date(ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Hong_Kong'});
 
-// [V16.0] Date Input Helper
 const toInputFormat = (ts) => {
     const d = new Date(ts);
-    // Format: YYYY-MM-DDTHH:MM
     return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
 };
 
@@ -72,16 +71,15 @@ export default function App() {
   const [strategyTip, setStrategyTip] = useState("等待數據...");
   const [tradeSetup, setTradeSetup] = useState(null);
   
-  // Settings & Filters
-  const [capital, setCapital] = useState(10000); 
+  const [capital, setCapital] = useState(1000); 
   const [riskPct, setRiskPct] = useState(2);     
+  const [leverage, setLeverage] = useState(1);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false); 
   
-  // [V16.0] Filter State
-  const [filterMode, setFilterMode] = useState('preset'); // 'preset' or 'custom'
-  const [presetPeriod, setPresetPeriod] = useState(0); // 0:All, 30, 60, 240, 1440, 10080, 43200
-  const [customRange, setCustomRange] = useState({ start: Date.now() - 86400000, end: Date.now() }); // Default last 24h
+  const [filterMode, setFilterMode] = useState('preset'); 
+  const [presetPeriod, setPresetPeriod] = useState(0); 
+  const [customRange, setCustomRange] = useState({ start: Date.now() - 86400000, end: Date.now() }); 
 
   const candlesRef = useRef([]); 
   const candleSeriesRef = useRef(null);
@@ -91,7 +89,7 @@ export default function App() {
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V16.0"; }, []);
+  useEffect(() => { document.title = "Jinguo Scalper V18.0"; }, []);
 
   useEffect(() => {
       if(candleSeriesRef.current && tradeHistory.length > 0) {
@@ -179,7 +177,6 @@ export default function App() {
                 if (activeSignalRef.current) {
                     const signal = activeSignalRef.current;
                     const elapsedMin = (Date.now() - signal.timestamp) / 60000;
-                    
                     if (candle.high >= signal.tp) {
                         const result = { ...signal, status: 'WIN', exitPrice: signal.tp, exitTime: formatHKTime(candle.time), entryTimeRaw: signal.entryTimeRaw };
                         setTradeHistory(prev => [result, ...prev]);
@@ -196,25 +193,31 @@ export default function App() {
                     }
                 }
 
-                // Logic & Setup
+                // [V18.0] Precision Entry Logic
                 const dist = (candle.close - curEMA)/curEMA*100;
                 let tip = "監測中...", setup = null;
                 const calcSize = (entry, stop) => {
                     const riskAmt = capital * (riskPct / 100);
                     const riskPerShare = Math.abs(entry - stop);
                     if(riskPerShare === 0) return 0;
-                    return Math.floor(riskAmt / riskPerShare);
+                    const riskBasedSize = riskAmt / riskPerShare;
+                    const walletBasedSize = (capital * leverage) / entry;
+                    return Math.min(riskBasedSize, walletBasedSize).toFixed(4);
                 };
 
                 const dynamicStop = Math.max(curEMA, srLevels?.low || curEMA - atr) - 0.5;
                 const dynamicTarget = (srLevels?.high > candle.close ? srLevels.high : candle.close + atr * 3).toFixed(2);
+                
+                // Smart Entry Point: a slight pullback or the EMA line
+                const limitEntry = Math.min(candle.close, curEMA + atr * 0.1); 
 
                 if (rsi > 80) tip = "⚠️ 危險：RSI 超買！";
                 else if (candle.close < curEMA) tip = "📉 跌勢：忍手。";
-                else if (dist > 0.15) { tip = "✋ 升過龍：等回調。"; } 
-                else if (dist >= 0 && dist <= 0.15) {
-                    tip = "🎯 黃金位：準備進場！";
-                    setup = { type: 'MARKET BUY', entry: candle.close.toFixed(2), target: dynamicTarget, stop: dynamicStop.toFixed(2), size: calcSize(candle.close, dynamicStop) };
+                else if (dist > 0.15 && candle.volume < volSMA * STRATEGY.VOL_MULTIPLIER) {
+                    tip = `✋ 升過龍：等回調到 EMA (${curEMA.toFixed(2)})`;
+                } else {
+                    tip = `🎯 黃金位：準備掛單！`;
+                    setup = { type: 'LIMIT BUY', entry: limitEntry.toFixed(2), target: dynamicTarget, stop: dynamicStop.toFixed(2), size: calcSize(limitEntry, dynamicStop) };
                 }
                 setStrategyTip(tip);
                 setTradeSetup(setup);
@@ -238,13 +241,13 @@ export default function App() {
     const ro = new ResizeObserver(e => { if(e[0].contentRect) { chart.applyOptions({width:e[0].contentRect.width, height:e[0].contentRect.height}); setTimeout(()=>chart.timeScale().fitContent(),0); }});
     ro.observe(chartContainerRef.current);
     return () => { wsPromise.then(w=>w&&w.close()); chart.remove(); ro.disconnect(); chartInstanceRef.current=null; };
-  }, [capital, riskPct]);
+  }, [capital, riskPct, leverage]);
 
   const rsiStat = (r) => r>=80 ? {c:'#ef4444',t:'⚠️ 危險'} : (r>=55 ? {c:'#4ade80',t:'🚀 強勢'} : {c:'#94a3b8',t:'⚪ 弱勢'});
   const rs = rsiStat(marketData.rsi);
   const riskAmt = (capital * (riskPct/100)).toFixed(0);
+  const buyingPower = (capital * leverage).toFixed(0); 
 
-  // [V16.0] Enhanced Filter Logic
   const filteredHistory = tradeHistory.filter(t => {
       if (filterMode === 'preset') {
           if (presetPeriod === 0) return true;
@@ -259,7 +262,6 @@ export default function App() {
   const losses = filteredHistory.filter(t => t.status === 'LOSS').length;
   const winRate = (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : 0;
 
-  // Preset buttons
   const presets = [
       { label: '30M', val: 30 }, { label: '1H', val: 60 }, { label: '4H', val: 240 },
       { label: '1D', val: 1440 }, { label: '1W', val: 10080 }, { label: '1M', val: 43200 }, { label: 'All', val: 0 }
@@ -272,11 +274,10 @@ export default function App() {
       <div style={styles.header}>
         <div style={styles.statusDot} className={connectionStatus==='ONLINE'?'pulse':''}></div>
         <div style={{flexGrow:1}}>
-            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V16.0</span></h1>
+            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V18.0</span></h1>
             <p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus}</p>
         </div>
         
-        {/* Stats Pill */}
         <div style={{display:'flex', gap:'10px', marginRight:'15px', alignItems:'center'}}>
              <div onClick={()=>setShowHistory(!showHistory)} style={{cursor:'pointer', background:'#27272a', padding:'5px 15px', borderRadius:'4px', border:'1px solid #3f3f46', fontSize:'0.9rem', color:'#fff'}}>
                  <span style={{color:'#94a3b8', marginRight:'5px'}}>
@@ -290,15 +291,16 @@ export default function App() {
 
       {showSettings && (
           <div style={styles.settingsPanel}>
-              <div style={{display:'flex', gap:'20px', alignItems:'center'}}>
+              <div style={{display:'flex', gap:'15px', alignItems:'center', flexWrap:'wrap'}}>
                   <label>本金: <input type="number" value={capital} onChange={e=>setCapital(Number(e.target.value))} style={styles.input} /></label>
                   <label>Risk%: <input type="number" value={riskPct} onChange={e=>setRiskPct(Number(e.target.value))} style={styles.input} /></label>
-                  <span style={{color:'#ef4444', fontWeight:'bold'}}>-${riskAmt}</span>
+                  <label>槓桿(x): <input type="number" value={leverage} onChange={e=>setLeverage(Number(e.target.value))} style={styles.input} /></label>
+                  <span style={{color:'#ef4444', fontWeight:'bold', fontSize:'0.8rem'}}>Risk: -${riskAmt}</span>
+                  <span style={{color:'#3b82f6', fontWeight:'bold', fontSize:'0.8rem'}}>Power: ${buyingPower}</span>
               </div>
           </div>
       )}
 
-      {/* [V16.0] History Panel with Custom Range */}
       {showHistory && (
           <div style={styles.historyPanel}>
               <div style={{borderBottom:'1px solid #3f3f46', paddingBottom:'10px', marginBottom:'10px'}}>
@@ -308,7 +310,6 @@ export default function App() {
                           {filterMode==='preset' ? '切換自定義' : '切換預設'}
                       </button>
                   </div>
-
                   {filterMode === 'preset' ? (
                       <div style={{display:'flex', gap:'5px', flexWrap:'wrap'}}>
                           {presets.map(p => (
@@ -335,7 +336,6 @@ export default function App() {
                       </div>
                   )}
               </div>
-              
               <div style={{maxHeight:'300px', overflowY:'auto'}}>
                   {filteredHistory.length === 0 ? <div style={{color:'#71717a', textAlign:'center', padding:'20px'}}>暫無記錄</div> : 
                    filteredHistory.map((t, i) => (
@@ -412,7 +412,7 @@ const styles = {
     subtitle: { fontSize:'0.8rem', color:'#71717a', margin:'4px 0 0 0' },
     settingsBtn: { background:'#27272a', color:'#fff', border:'none', padding:'8px 15px', borderRadius:'4px', cursor:'pointer', fontWeight:'bold' },
     settingsPanel: { background:'#18181b', padding:'15px', borderRadius:'8px', marginBottom:'15px', border:'1px solid #3f3f46' },
-    input: { background:'#000', border:'1px solid #3f3f46', color:'#fff', padding:'5px', borderRadius:'4px', marginLeft:'5px', width:'80px' },
+    input: { background:'#000', border:'1px solid #3f3f46', color:'#fff', padding:'5px', borderRadius:'4px', marginLeft:'5px', width:'60px' },
     grid: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))', gap:'15px', marginBottom:'15px', flexShrink:0 },
     alertBox: { padding:'15px 20px', borderRadius:'8px', marginBottom:'15px', fontWeight:'bold', width:'100%', boxSizing:'border-box', flexShrink:0 },
     tipBar: { background:'#1e293b', borderLeft:'4px solid #3b82f6', padding:'10px 15px', borderRadius:'4px', fontSize:'0.9rem', color:'#94a3b8', flexGrow:1, display:'flex', alignItems:'center' },
