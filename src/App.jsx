@@ -1,5 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createChart, ColorType, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
+import { createClient } from '@supabase/supabase-js'; // [V20.0] Import Supabase
+
+// --- [V20.0] Supabase Config ---
+// ⚠️ REPLACE THESE WITH YOUR ACTUAL KEYS FROM SUPABASE DASHBOARD
+const SUPABASE_URL = 'https://iiteqpbtsssvrlpuxppj.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlpdGVxcGJ0c3NzdnJscHV4cHBqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUzNTYzMTgsImV4cCI6MjA4MDkzMjMxOH0.fzHqf_kiP7Ba8A7q4zo4hL4I4nILXX-imAhatZZdS1k';
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // --- Config ---
 const STRATEGY = {
@@ -7,10 +14,10 @@ const STRATEGY = {
   MACD_FAST: 12, MACD_SLOW: 26, MACD_SIGNAL: 9, 
   RSI_THRESHOLD: 55, RSI_OVERBOUGHT: 80, VOL_MULTIPLIER: 1.5, ATR_PERIOD: 14,
   LOOKBACK_PERIOD: 50,
-  ENTRY_PULLBACK: 0.02 // [V18.0] % pullback from high for limit buy
+  ENTRY_PULLBACK: 0.02
 };
 
-// --- Helpers (Same as before) ---
+// --- Helpers ---
 const calculateRSI = (prices, period=14) => {
   if (!prices || prices.length < period + 1) return 50;
   let gains = 0, losses = 0;
@@ -66,7 +73,7 @@ export default function App() {
   
   const [marketData, setMarketData] = useState({ price: 0, rsi: 0, volFactor: "0.00", ema: 0, macdHist: 0, atr: 0, support: 0, resistance: 0 });
   const [activeSignal, setActiveSignal] = useState(null); 
-  const [tradeHistory, setTradeHistory] = useState([]);   
+  const [tradeHistory, setTradeHistory] = useState([]); // Now loaded from Supabase
   const [connectionStatus, setConnectionStatus] = useState('連線中...');
   const [strategyTip, setStrategyTip] = useState("等待數據...");
   const [tradeSetup, setTradeSetup] = useState(null);
@@ -89,7 +96,56 @@ export default function App() {
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V18.0"; }, []);
+  useEffect(() => { document.title = "Jinguo Scalper V20.0 Cloud"; }, []);
+
+  // [V20.0] Fetch History from Supabase on Load
+  useEffect(() => {
+    const fetchHistory = async () => {
+        const { data, error } = await supabase
+            .from('trades')
+            .select('*')
+            .order('entry_time', { ascending: false })
+            .limit(100);
+        
+        if (data) {
+            // Map DB fields to App format
+            const mapped = data.map(d => ({
+                status: d.status,
+                price: d.entry_price,
+                exitPrice: d.exit_price,
+                time: formatHKTime(new Date(d.entry_time).getTime()/1000),
+                entryTimeRaw: new Date(d.entry_time).getTime()/1000,
+                timestamp: new Date(d.entry_time).getTime()
+            }));
+            setTradeHistory(mapped);
+        }
+    };
+    fetchHistory();
+    
+    // Subscribe to realtime changes (if other devices update DB)
+    const channel = supabase.channel('trades_realtime')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, payload => {
+            fetchHistory(); // Refresh list on new trade
+        })
+        .subscribe();
+        
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
+  // [V20.0] Save Trade to Supabase
+  const recordTrade = async (signal, resultStatus, exitPrice, candleTime) => {
+      const { error } = await supabase.from('trades').insert({
+          type: signal.type,
+          status: resultStatus, // 'WIN' or 'LOSS'
+          entry_price: signal.price,
+          exit_price: exitPrice,
+          tp: signal.tp,
+          sl: signal.sl,
+          entry_time: new Date(signal.timestamp).toISOString(),
+          exit_time: new Date(candleTime * 1000).toISOString()
+      });
+      if(error) console.error("DB Save Error:", error);
+  };
 
   useEffect(() => {
       if(candleSeriesRef.current && tradeHistory.length > 0) {
@@ -177,14 +233,13 @@ export default function App() {
                 if (activeSignalRef.current) {
                     const signal = activeSignalRef.current;
                     const elapsedMin = (Date.now() - signal.timestamp) / 60000;
+                    
                     if (candle.high >= signal.tp) {
-                        const result = { ...signal, status: 'WIN', exitPrice: signal.tp, exitTime: formatHKTime(candle.time), entryTimeRaw: signal.entryTimeRaw };
-                        setTradeHistory(prev => [result, ...prev]);
+                        recordTrade(signal, 'WIN', signal.tp, candle.time); // Save to DB
                         setActiveSignal(null);
                         activeSignalRef.current = null;
                     } else if (candle.low <= signal.sl) {
-                        const result = { ...signal, status: 'LOSS', exitPrice: signal.sl, exitTime: formatHKTime(candle.time), entryTimeRaw: signal.entryTimeRaw };
-                        setTradeHistory(prev => [result, ...prev]);
+                        recordTrade(signal, 'LOSS', signal.sl, candle.time); // Save to DB
                         setActiveSignal(null);
                         activeSignalRef.current = null;
                     } else if (elapsedMin > 15) {
@@ -193,7 +248,6 @@ export default function App() {
                     }
                 }
 
-                // [V18.0] Precision Entry Logic
                 const dist = (candle.close - curEMA)/curEMA*100;
                 let tip = "監測中...", setup = null;
                 const calcSize = (entry, stop) => {
@@ -207,8 +261,6 @@ export default function App() {
 
                 const dynamicStop = Math.max(curEMA, srLevels?.low || curEMA - atr) - 0.5;
                 const dynamicTarget = (srLevels?.high > candle.close ? srLevels.high : candle.close + atr * 3).toFixed(2);
-                
-                // Smart Entry Point: a slight pullback or the EMA line
                 const limitEntry = Math.min(candle.close, curEMA + atr * 0.1); 
 
                 if (rsi > 80) tip = "⚠️ 危險：RSI 超買！";
@@ -267,6 +319,14 @@ export default function App() {
       { label: '1D', val: 1440 }, { label: '1W', val: 10080 }, { label: '1M', val: 43200 }, { label: 'All', val: 0 }
   ];
 
+  // [V20.0] Clear History (Optional - for DB you might want to protect this)
+  const clearHistory = async () => {
+      if (window.confirm('確定要清除所有交易記錄？這會清空數據庫！')) {
+          await supabase.from('trades').delete().neq('id', 0); // Delete all
+          setTradeHistory([]);
+      }
+  };
+
   return (
     <div style={styles.container}>
       <style>{`html,body,#root{margin:0;padding:0;width:100%;height:100%;background:#09090b;overflow:hidden}.pulse{animation:pulse 2s infinite}@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,0.7)}70%{box-shadow:0 0 0 10px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}`}</style>
@@ -274,8 +334,8 @@ export default function App() {
       <div style={styles.header}>
         <div style={styles.statusDot} className={connectionStatus==='ONLINE'?'pulse':''}></div>
         <div style={{flexGrow:1}}>
-            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V18.0</span></h1>
-            <p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus}</p>
+            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>CLOUD</span></h1>
+            <p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus} • DB Connected</p>
         </div>
         
         <div style={{display:'flex', gap:'10px', marginRight:'15px', alignItems:'center'}}>
@@ -297,6 +357,7 @@ export default function App() {
                   <label>槓桿(x): <input type="number" value={leverage} onChange={e=>setLeverage(Number(e.target.value))} style={styles.input} /></label>
                   <span style={{color:'#ef4444', fontWeight:'bold', fontSize:'0.8rem'}}>Risk: -${riskAmt}</span>
                   <span style={{color:'#3b82f6', fontWeight:'bold', fontSize:'0.8rem'}}>Power: ${buyingPower}</span>
+                  <button onClick={clearHistory} style={{background:'#ef4444', color:'#fff', border:'none', padding:'5px 10px', borderRadius:'4px', cursor:'pointer', fontSize:'0.75rem', fontWeight:'bold'}}>清空數據庫</button>
               </div>
           </div>
       )}
@@ -305,7 +366,7 @@ export default function App() {
           <div style={styles.historyPanel}>
               <div style={{borderBottom:'1px solid #3f3f46', paddingBottom:'10px', marginBottom:'10px'}}>
                   <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px'}}>
-                      <strong>交易記錄</strong>
+                      <strong>交易記錄 ({tradeHistory.length})</strong>
                       <button onClick={()=>setFilterMode(filterMode==='preset'?'custom':'preset')} style={styles.toggleBtn}>
                           {filterMode==='preset' ? '切換自定義' : '切換預設'}
                       </button>
@@ -408,7 +469,7 @@ const styles = {
     header: { display:'flex', alignItems:'center', gap:'15px', marginBottom:'15px', borderBottom:'2px solid #27272a', paddingBottom:'15px', flexShrink:0 },
     statusDot: { width:'12px', height:'12px', background:'#4ade80', borderRadius:'50%' },
     title: { fontSize:'1.5rem', fontWeight:'700', margin:0 },
-    proBadge: { background:'#facc15', color:'#000', fontSize:'0.7rem', padding:'2px 6px', borderRadius:'4px', verticalAlign:'top', fontWeight:'bold', marginLeft:'8px' },
+    proBadge: { background:'#3b82f6', color:'#fff', fontSize:'0.7rem', padding:'2px 6px', borderRadius:'4px', verticalAlign:'top', fontWeight:'bold', marginLeft:'8px' },
     subtitle: { fontSize:'0.8rem', color:'#71717a', margin:'4px 0 0 0' },
     settingsBtn: { background:'#27272a', color:'#fff', border:'none', padding:'8px 15px', borderRadius:'4px', cursor:'pointer', fontWeight:'bold' },
     settingsPanel: { background:'#18181b', padding:'15px', borderRadius:'8px', marginBottom:'15px', border:'1px solid #3f3f46' },
