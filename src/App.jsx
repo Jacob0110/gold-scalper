@@ -6,6 +6,7 @@ const STRATEGY = {
   RSI_PERIOD: 14, VOL_MA_PERIOD: 20, EMA_PERIOD: 20,
   MACD_FAST: 12, MACD_SLOW: 26, MACD_SIGNAL: 9, 
   RSI_THRESHOLD: 55, RSI_OVERBOUGHT: 80, VOL_MULTIPLIER: 1.5,
+  ATR_PERIOD: 14 // [新增] 用於計算止賺止蝕距離
 };
 
 // --- Helpers ---
@@ -61,6 +62,19 @@ function calculateMACD(data, fastPeriod, slowPeriod, signalPeriod) {
     return { macd: lastMACD, signal: lastSignal, hist: lastHist };
 }
 
+// [新增] ATR (Average True Range) 計算，用於動態止賺止蝕
+function calculateATR(highs, lows, closes, period) {
+    if (!highs || highs.length < period + 1) return 1;
+    let trs = [];
+    for(let i=1; i<highs.length; i++) {
+        const tr = Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i-1]), Math.abs(lows[i] - closes[i-1]));
+        trs.push(tr);
+    }
+    const effectivePeriod = Math.min(trs.length, period);
+    const slice = trs.slice(-effectivePeriod);
+    return slice.reduce((a,b)=>a+b, 0) / effectivePeriod;
+}
+
 function getSafeVolFactor(currentVol, sma) {
     const v = parseFloat(currentVol);
     const s = parseFloat(sma);
@@ -78,15 +92,20 @@ export default function App() {
   const chartContainerRef = useRef(null);
   const chartInstanceRef = useRef(null);
   
-  const [marketData, setMarketData] = useState({ price: 0, rsi: 0, volFactor: "0.00", ema: 0, macdHist: 0 });
+  const [marketData, setMarketData] = useState({ price: 0, rsi: 0, volFactor: "0.00", ema: 0, macdHist: 0, atr: 0 });
   const [lastSignal, setLastSignal] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('連線中...');
   const [strategyTip, setStrategyTip] = useState("等待數據...");
+  const [tradeSetup, setTradeSetup] = useState(null); // [新增] 交易計劃
 
   const candlesRef = useRef([]); 
   const candleSeriesRef = useRef(null);
   const volumeSeriesRef = useRef(null);
   const emaSeriesRef = useRef(null);
+
+  useEffect(() => {
+    document.title = "Jinguo Scalper V10.0";
+  }, []);
 
   useEffect(() => {
     if (!chartContainerRef.current || chartInstanceRef.current) return;
@@ -150,23 +169,51 @@ export default function App() {
                 const volSMA = calculateSMA(hist.map(c => c.volume), STRATEGY.VOL_MA_PERIOD);
                 const volFactor = getSafeVolFactor(candle.volume, volSMA);
                 const macdData = calculateMACD(closePrices, STRATEGY.MACD_FAST, STRATEGY.MACD_SLOW, STRATEGY.MACD_SIGNAL);
+                
+                // [新增] ATR Calculation
+                const atr = calculateATR(calcHist.map(c=>c.high), calcHist.map(c=>c.low), closePrices, STRATEGY.ATR_PERIOD);
 
                 setMarketData({ 
                     price: candle.close, 
                     rsi: rsi.toFixed(1), 
                     volFactor, 
                     ema: currentEMA ? currentEMA.toFixed(2) : 0,
-                    macdHist: macdData.hist
+                    macdHist: macdData.hist,
+                    atr: atr
                 });
 
+                // [V10.0] 智能教練邏輯 & 戰術計算
                 const dist = (candle.close - currentEMA) / currentEMA * 100;
                 let tip = "監測中...";
-                if (rsi > 80) tip = "⚠️ 危險：RSI 超買！準備獲利離場。";
-                else if (candle.close < currentEMA) tip = "📉 跌勢：價格喺 EMA 下面，忍手。";
-                else if (macdData.hist < 0) tip = "🛑 觀察：MACD 動能弱，小心假突破。";
-                else if (dist > 0.15) tip = "✋ 升過龍：離 EMA 太遠啦，等回調。";
-                else if (dist >= 0 && dist <= 0.15) tip = "🎯 黃金位：回踩 EMA + MACD 轉強，準備！";
+                
+                // 動態計算建議的掛單位 (Setup)
+                let setup = null;
+                
+                if (rsi > 80) {
+                    tip = "⚠️ 危險：RSI 超買！請考慮獲利離場。";
+                } else if (candle.close < currentEMA) {
+                    tip = "📉 跌勢：價格喺 EMA 下面，忍手。";
+                } else if (dist > 0.15) {
+                    tip = "✋ 升過龍：等回調返 EMA 先講。";
+                    // 建議掛單在 EMA 附近
+                    setup = {
+                        entry: currentEMA.toFixed(2),
+                        target: (currentEMA + atr * 2).toFixed(2), // 2倍 ATR 利潤
+                        stop: (currentEMA - atr * 1).toFixed(2),   // 1倍 ATR 止蝕
+                        type: 'WAIT PULLBACK'
+                    };
+                } else if (dist >= 0 && dist <= 0.15) {
+                    tip = "🎯 黃金位：現價貼近 EMA，可考慮進場！";
+                    setup = {
+                        entry: candle.close.toFixed(2),
+                        target: (candle.close + atr * 3).toFixed(2), // 搏發力，3倍利潤
+                        stop: (currentEMA - atr * 0.5).toFixed(2),   // 緊貼 EMA 止蝕
+                        type: 'MARKET BUY'
+                    };
+                }
+                
                 setStrategyTip(tip);
+                setTradeSetup(setup);
 
                 if (k.x) {
                     hist.push(candle);
@@ -216,14 +263,12 @@ export default function App() {
       <style>{`html, body, #root { margin: 0; padding: 0; width: 100%; height: 100%; max-width: none; background: #09090b; overflow: hidden; }`}</style>
       <div style={styles.header}>
         <div style={styles.statusDot} className={connectionStatus === 'ONLINE' ? 'pulse' : ''}></div>
-        <div><h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V9.1</span></h1><p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus}</p></div>
+        <div><h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V10.0</span></h1><p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus}</p></div>
       </div>
       <div style={styles.grid}>
         <StatCard label="最新價格" value={marketData.price.toFixed(2)} unit="$" color="#FFFFFF" isMain={true} />
         <StatCard label="RSI (14)" value={marketData.rsi || 0} color={rsiStat.color} sub={rsiStat.text} />
-        {/* [V9.1] 恢復了成交倍數卡 */}
         <StatCard label="成交倍數" value={marketData.volFactor || "0.00"} unit="x" color={volVal > 1.5 ? '#4ade80' : '#94a3b8'} sub={volVal > 1.5 ? "🚀 爆量" : "💤 縮量"} />
-        {/* [V9.1] MACD 繼續保留 */}
         <StatCard label="MACD 動能" value={macdVal > 0 ? "BULL" : "BEAR"} unit="" color={macdVal > 0 ? '#4ade80' : '#ef4444'} sub={macdVal > 0 ? "▲ 上升中" : "▼ 下跌中"} />
         <StatCard label="EMA (20)" value={marketData.ema || 0} unit="$" color="#fbbf24" sub="支撐線" />
       </div>
@@ -238,7 +283,25 @@ export default function App() {
             </div>
         </div>
       )}
-      <div style={styles.tipBar}><span style={{marginRight: '10px'}}>💡 教練提示:</span><span style={{color: '#fff', fontWeight: 'bold'}}>{strategyTip}</span></div>
+      
+      {/* [V10.0] 戰術面板 & 提示 */}
+      <div style={{display:'flex', gap:'10px', marginBottom:'15px', alignItems:'stretch'}}>
+          <div style={styles.tipBar}>
+              <span style={{marginRight: '10px'}}>💡 教練提示:</span>
+              <span style={{color: '#fff', fontWeight: 'bold'}}>{strategyTip}</span>
+          </div>
+          {tradeSetup && (
+             <div style={styles.setupBox}>
+                 <div style={{fontSize:'0.7rem', color:'#94a3b8', marginBottom:'4px'}}>建議部署 ({tradeSetup.type})</div>
+                 <div style={{display:'flex', gap:'15px', fontSize:'0.9rem', fontWeight:'bold'}}>
+                     <span style={{color:'#3b82f6'}}>🔵 入: {tradeSetup.entry}</span>
+                     <span style={{color:'#4ade80'}}>🎯 賺: {tradeSetup.target}</span>
+                     <span style={{color:'#ef4444'}}>🛑 蝕: {tradeSetup.stop}</span>
+                 </div>
+             </div>
+          )}
+      </div>
+
       <div style={styles.chartWrapper}><div ref={chartContainerRef} style={styles.chartContainer} /></div>
       <style>{`@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(74, 222, 128, 0); } 100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0); } } .pulse { animation: pulse 2s infinite; }`}</style>
     </div>
@@ -254,7 +317,8 @@ const styles = {
     subtitle: { fontSize: '0.8rem', color: '#71717a', margin: '4px 0 0 0' },
     grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '15px', marginBottom: '15px', width: '100%', flexShrink: 0 },
     alertBox: { padding: '15px 20px', borderRadius: '8px', marginBottom: '15px', fontWeight: 'bold', width: '100%', boxSizing: 'border-box', flexShrink: 0 },
-    tipBar: { background: '#1e293b', borderLeft: '4px solid #3b82f6', padding: '10px 15px', borderRadius: '4px', marginBottom: '15px', fontSize: '0.9rem', color: '#94a3b8', flexShrink: 0 },
+    tipBar: { background: '#1e293b', borderLeft: '4px solid #3b82f6', padding: '10px 15px', borderRadius: '4px', fontSize: '0.9rem', color: '#94a3b8', flexGrow: 1, display: 'flex', alignItems: 'center' },
+    setupBox: { background: '#18181b', border: '1px solid #27272a', borderRadius: '4px', padding: '10px 15px', flexGrow: 1 },
     chartWrapper: { flexGrow: 1, width: '100%', position: 'relative', background: '#000', border: '2px solid #27272a', borderRadius: '8px', overflow: 'hidden' },
     chartContainer: { width: '100%', height: '100%' },
 };
