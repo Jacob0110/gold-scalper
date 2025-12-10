@@ -59,15 +59,18 @@ export default function App() {
   const chartInstanceRef = useRef(null);
   
   const [marketData, setMarketData] = useState({ price: 0, rsi: 0, volFactor: "0.00", ema: 0, macdHist: 0, atr: 0, support: 0, resistance: 0 });
-  const [activeSignal, setActiveSignal] = useState(null); // Currently active signal
-  const [tradeHistory, setTradeHistory] = useState([]);   // [V14.0] Record of past trades
+  const [activeSignal, setActiveSignal] = useState(null); 
+  const [tradeHistory, setTradeHistory] = useState([]);   
   const [connectionStatus, setConnectionStatus] = useState('連線中...');
   const [strategyTip, setStrategyTip] = useState("等待數據...");
   const [tradeSetup, setTradeSetup] = useState(null);
   
+  // Settings & Filters
   const [capital, setCapital] = useState(10000); 
   const [riskPct, setRiskPct] = useState(2);     
   const [showSettings, setShowSettings] = useState(false);
+  const [showHistory, setShowHistory] = useState(false); // [V15.0] Toggle History Panel
+  const [filterPeriod, setFilterPeriod] = useState(0);   // [V15.0] 0:All, 60:1H, 240:4H
 
   const candlesRef = useRef([]); 
   const candleSeriesRef = useRef(null);
@@ -75,9 +78,25 @@ export default function App() {
   const emaSeriesRef = useRef(null);
   const supportLineRef = useRef(null);
   const resistanceLineRef = useRef(null);
-  const activeSignalRef = useRef(null); // Ref to track active signal inside websocket callback
+  const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V14.0"; }, []);
+  useEffect(() => { document.title = "Jinguo Scalper V15.0"; }, []);
+
+  // [V15.0] Update Chart Markers based on Trade History
+  useEffect(() => {
+      if(candleSeriesRef.current && tradeHistory.length > 0) {
+          const markers = tradeHistory.map(t => ({
+              time: t.entryTimeRaw, // Need raw timestamp for markers
+              position: t.status === 'WIN' ? 'belowBar' : 'aboveBar',
+              color: t.status === 'WIN' ? '#4ade80' : '#ef4444',
+              shape: t.status === 'WIN' ? 'arrowUp' : 'arrowDown',
+              text: t.status === 'WIN' ? 'WIN' : 'LOSS',
+          }));
+          // Sort markers by time as required by lightweight-charts
+          markers.sort((a,b) => a.time - b.time);
+          candleSeriesRef.current.setMarkers(markers);
+      }
+  }, [tradeHistory]);
 
   const updateSupportResistance = (series, candles) => {
       if (!series || candles.length < STRATEGY.LOOKBACK_PERIOD) return;
@@ -148,25 +167,21 @@ export default function App() {
 
                 setMarketData({ price: candle.close, rsi: rsi.toFixed(1), volFactor, ema: curEMA?curEMA.toFixed(2):0, macdHist: macd.hist, atr, support: srLevels?.low, resistance: srLevels?.high });
 
-                // [V14.0] Check Active Signal Status (Win/Loss/Timeout)
                 if (activeSignalRef.current) {
                     const signal = activeSignalRef.current;
                     const elapsedMin = (Date.now() - signal.timestamp) / 60000;
                     
                     if (candle.high >= signal.tp) {
-                        // WIN
-                        const result = { ...signal, status: 'WIN', exitPrice: signal.tp, exitTime: formatHKTime(candle.time) };
+                        const result = { ...signal, status: 'WIN', exitPrice: signal.tp, exitTime: formatHKTime(candle.time), entryTimeRaw: signal.entryTimeRaw };
                         setTradeHistory(prev => [result, ...prev]);
                         setActiveSignal(null);
                         activeSignalRef.current = null;
                     } else if (candle.low <= signal.sl) {
-                        // LOSS
-                        const result = { ...signal, status: 'LOSS', exitPrice: signal.sl, exitTime: formatHKTime(candle.time) };
+                        const result = { ...signal, status: 'LOSS', exitPrice: signal.sl, exitTime: formatHKTime(candle.time), entryTimeRaw: signal.entryTimeRaw };
                         setTradeHistory(prev => [result, ...prev]);
                         setActiveSignal(null);
                         activeSignalRef.current = null;
                     } else if (elapsedMin > 15) {
-                        // TIMEOUT (Treat as breakeven or small loss/win)
                         setActiveSignal(null);
                         activeSignalRef.current = null;
                     }
@@ -197,11 +212,10 @@ export default function App() {
 
                 if (k.x) {
                     h.push(candle); if (h.length>500) h.shift(); candlesRef.current=h;
-                    // Trigger New Signal (Only if no active signal)
                     if (!activeSignalRef.current && rsi>STRATEGY.RSI_THRESHOLD && rsi<STRATEGY.RSI_OVERBOUGHT && candle.volume>volSMA*STRATEGY.VOL_MULTIPLIER && macd.hist>0) {
                         const newSignal = { 
                             type: '🚀 爆升突破', variant: 'success', price: candle.close, time: formatHKTime(candle.time), reason: `Vol ${volFactor}x`,
-                            tp: parseFloat(dynamicTarget), sl: parseFloat(dynamicStop.toFixed(2)), timestamp: Date.now()
+                            tp: parseFloat(dynamicTarget), sl: parseFloat(dynamicStop.toFixed(2)), timestamp: Date.now(), entryTimeRaw: candle.time
                         };
                         setActiveSignal(newSignal);
                         activeSignalRef.current = newSignal;
@@ -221,9 +235,15 @@ export default function App() {
   const rs = rsiStat(marketData.rsi);
   const riskAmt = (capital * (riskPct/100)).toFixed(0);
 
-  // Stats Calculation
-  const wins = tradeHistory.filter(t => t.status === 'WIN').length;
-  const losses = tradeHistory.filter(t => t.status === 'LOSS').length;
+  // Filter Logic
+  const filteredHistory = tradeHistory.filter(t => {
+      if (filterPeriod === 0) return true;
+      const elapsed = (Date.now() - t.timestamp) / (1000 * 60); // minutes
+      return elapsed <= filterPeriod;
+  });
+
+  const wins = filteredHistory.filter(t => t.status === 'WIN').length;
+  const losses = filteredHistory.filter(t => t.status === 'LOSS').length;
   const winRate = (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : 0;
 
   return (
@@ -233,23 +253,54 @@ export default function App() {
       <div style={styles.header}>
         <div style={styles.statusDot} className={connectionStatus==='ONLINE'?'pulse':''}></div>
         <div style={{flexGrow:1}}>
-            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V14.0</span></h1>
+            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V15.0</span></h1>
             <p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus}</p>
         </div>
-        <div style={{display:'flex', gap:'15px', marginRight:'20px'}}>
-             <div style={styles.statPill}><span style={{color:'#4ade80'}}>W: {wins}</span></div>
-             <div style={styles.statPill}><span style={{color:'#ef4444'}}>L: {losses}</span></div>
-             <div style={styles.statPill}><span style={{color:'#fbbf24'}}>Win%: {winRate}%</span></div>
+        
+        {/* Stats Pill */}
+        <div style={{display:'flex', gap:'10px', marginRight:'15px', alignItems:'center'}}>
+             <div onClick={()=>setShowHistory(!showHistory)} style={{cursor:'pointer', background:'#27272a', padding:'5px 15px', borderRadius:'4px', border:'1px solid #3f3f46', fontSize:'0.9rem', color:'#fff'}}>
+                 {filterPeriod===0?'All Time':(filterPeriod===60?'Last 1H':'Last 4H')} Result: <span style={{color:winRate>=50?'#4ade80':'#ef4444', fontWeight:'bold'}}>{winRate}% ({wins}W-{losses}L)</span>
+             </div>
         </div>
-        <button onClick={()=>setShowSettings(!showSettings)} style={styles.settingsBtn}>⚙️ 設定資金</button>
+        <button onClick={()=>setShowSettings(!showSettings)} style={styles.settingsBtn}>⚙️</button>
       </div>
 
       {showSettings && (
           <div style={styles.settingsPanel}>
               <div style={{display:'flex', gap:'20px', alignItems:'center'}}>
-                  <label>本金 (USD): <input type="number" value={capital} onChange={e=>setCapital(Number(e.target.value))} style={styles.input} /></label>
-                  <label>風險 (%): <input type="number" value={riskPct} onChange={e=>setRiskPct(Number(e.target.value))} style={styles.input} /></label>
-                  <span style={{color:'#ef4444', fontWeight:'bold'}}>Risk per trade: -${riskAmt}</span>
+                  <label>本金: <input type="number" value={capital} onChange={e=>setCapital(Number(e.target.value))} style={styles.input} /></label>
+                  <label>Risk%: <input type="number" value={riskPct} onChange={e=>setRiskPct(Number(e.target.value))} style={styles.input} /></label>
+                  <span style={{color:'#ef4444', fontWeight:'bold'}}>-${riskAmt}</span>
+              </div>
+          </div>
+      )}
+
+      {/* [V15.0] History Panel Overlay */}
+      {showHistory && (
+          <div style={styles.historyPanel}>
+              <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px', borderBottom:'1px solid #3f3f46', paddingBottom:'5px'}}>
+                  <strong>交易記錄</strong>
+                  <div style={{display:'flex', gap:'5px'}}>
+                      <button onClick={()=>setFilterPeriod(60)} style={filterPeriod===60?styles.filterBtnActive:styles.filterBtn}>1H</button>
+                      <button onClick={()=>setFilterPeriod(240)} style={filterPeriod===240?styles.filterBtnActive:styles.filterBtn}>4H</button>
+                      <button onClick={()=>setFilterPeriod(0)} style={filterPeriod===0?styles.filterBtnActive:styles.filterBtn}>ALL</button>
+                  </div>
+              </div>
+              <div style={{maxHeight:'200px', overflowY:'auto'}}>
+                  {filteredHistory.length === 0 ? <div style={{color:'#71717a', textAlign:'center', padding:'20px'}}>暫無記錄</div> : 
+                   filteredHistory.map((t, i) => (
+                      <div key={i} style={{display:'flex', justifyContent:'space-between', fontSize:'0.85rem', padding:'8px 0', borderBottom:'1px solid #27272a'}}>
+                          <div>
+                              <span style={{color:t.status==='WIN'?'#4ade80':'#ef4444', fontWeight:'bold', marginRight:'10px'}}>{t.status}</span>
+                              <span style={{color:'#94a3b8'}}>{t.time}</span>
+                          </div>
+                          <div style={{textAlign:'right'}}>
+                              <div style={{color:'#fff'}}>Entry: {t.price}</div>
+                              <div style={{color:'#71717a', fontSize:'0.75rem'}}>Exit: {t.exitPrice}</div>
+                          </div>
+                      </div>
+                  ))}
               </div>
           </div>
       )}
@@ -262,7 +313,6 @@ export default function App() {
         <StatCard label="EMA (20)" value={marketData.ema || 0} unit="$" color="#fbbf24" sub="Trend" />
       </div>
 
-      {/* Active Signal Alert */}
       {activeSignal && (
         <div style={{...styles.alertBox, background: '#4ade80'}}>
             <div style={{display:'flex', alignItems:'center', gap:'15px'}}>
@@ -270,7 +320,7 @@ export default function App() {
                 <div style={{flexGrow:1}}>
                     <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
                         <strong style={{fontSize:'1.1rem',color:'#000'}}>ACTIVE TRADE: {activeSignal.price}</strong>
-                        <button onClick={()=>{setActiveSignal(null); activeSignalRef.current=null;}} style={styles.closeBtn}>✕ 結束監控</button>
+                        <button onClick={()=>{setActiveSignal(null); activeSignalRef.current=null;}} style={styles.closeBtn}>✕</button>
                     </div>
                     <div style={{marginTop:'5px', paddingTop:'5px', borderTop:'1px solid rgba(0,0,0,0.1)', display:'flex', gap:'15px', fontSize:'0.95rem', color:'#000', fontWeight:'bold'}}>
                              <span>🎯 TP: {activeSignal.tp}</span>
@@ -279,18 +329,6 @@ export default function App() {
                 </div>
             </div>
         </div>
-      )}
-
-      {/* Trade History (Last 3) */}
-      {tradeHistory.length > 0 && (
-          <div style={{display:'flex', gap:'10px', marginBottom:'15px', overflowX:'auto'}}>
-              {tradeHistory.slice(0, 3).map((t, i) => (
-                  <div key={i} style={{background:'#18181b', padding:'5px 10px', borderRadius:'4px', borderLeft: t.status==='WIN'?'4px solid #4ade80':'4px solid #ef4444', minWidth:'120px'}}>
-                      <div style={{fontSize:'0.7rem', color:'#94a3b8'}}>{t.time}</div>
-                      <div style={{fontWeight:'bold', color: t.status==='WIN'?'#4ade80':'#ef4444'}}>{t.status}</div>
-                  </div>
-              ))}
-          </div>
       )}
 
       <div style={{display:'flex', gap:'10px', marginBottom:'15px', alignItems:'stretch'}}>
@@ -333,7 +371,9 @@ const styles = {
     chartWrapper: { flexGrow:1, width:'100%', position:'relative', background:'#000', border:'2px solid #27272a', borderRadius:'8px', overflow:'hidden' },
     chartContainer: { width:'100%', height:'100%' },
     closeBtn: { background:'rgba(0,0,0,0.2)', border:'none', cursor:'pointer', padding:'2px 8px', borderRadius:'4px', fontWeight:'bold'},
-    statPill: { background:'#18181b', padding:'5px 10px', borderRadius:'4px', fontSize:'0.9rem', fontWeight:'bold', border:'1px solid #27272a' }
+    historyPanel: { position:'absolute', top:'80px', right:'20px', width:'300px', background:'#18181b', border:'1px solid #3f3f46', borderRadius:'8px', padding:'15px', zIndex:100, boxShadow:'0 10px 25px rgba(0,0,0,0.5)'},
+    filterBtn: { background:'transparent', color:'#71717a', border:'none', cursor:'pointer', fontSize:'0.8rem' },
+    filterBtnActive: { background:'#27272a', color:'#fff', border:'none', cursor:'pointer', fontSize:'0.8rem', borderRadius:'4px', padding:'2px 6px' }
 };
 
 function StatCard({ label, value, unit, color, sub, isMain }) {
