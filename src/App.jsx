@@ -88,33 +88,45 @@ export default function App() {
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V23.0"; }, []);
+  useEffect(() => { document.title = "Jinguo Scalper V25.0"; }, []);
 
   // --- Supabase Data Loading ---
   useEffect(() => {
     if(!supabase) return;
     const fetchHistory = async () => {
+        // [Fix] 抓取過去 30 天的數據，上限 2000 筆，確保隔夜數據不會消失
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        
         const { data, error } = await supabase
             .from('trades')
             .select('*')
+            .gte('entry_time', thirtyDaysAgo) 
             .order('entry_time', { ascending: false })
-            .limit(100);
+            .limit(2000);
+
         if (data) {
             const mapped = data.map(d => ({
                 status: d.status,
                 price: d.entry_price,
                 exitPrice: d.exit_price,
-                time: formatHKTime(new Date(d.entry_time).getTime()/1000),
+                // 格式化顯示時間
+                time: new Date(d.entry_time).toLocaleString('en-GB', {
+                    month: '2-digit', day: '2-digit', 
+                    hour: '2-digit', minute: '2-digit', hour12: false
+                }), 
                 entryTimeRaw: new Date(d.entry_time).getTime()/1000,
                 timestamp: new Date(d.entry_time).getTime()
             }));
             setTradeHistory(mapped);
         }
     };
+    
     fetchHistory();
+    
     const channel = supabase.channel('trades_realtime')
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, payload => { fetchHistory(); })
         .subscribe();
+        
     return () => { supabase.removeChannel(channel); };
   }, []);
 
@@ -508,33 +520,119 @@ export default function App() {
     </div>
   );
 }
-
+const isMobile = window.innerWidth < 768; // 簡單判斷是否為手機
 const styles = {
-    container: { padding:'20px', background:'#09090b', color:'#f4f4f5', height:'100vh', width:'100vw', boxSizing:'border-box', fontFamily:"'Roboto Mono', sans-serif", display:'flex', flexDirection:'column' },
-    header: { display:'flex', alignItems:'center', gap:'15px', marginBottom:'15px', borderBottom:'2px solid #27272a', paddingBottom:'15px', flexShrink:0 },
-    statusDot: { width:'12px', height:'12px', background:'#4ade80', borderRadius:'50%' },
-    title: { fontSize:'1.5rem', fontWeight:'700', margin:0 },
-    proBadge: { background:'#3b82f6', color:'#fff', fontSize:'0.7rem', padding:'2px 6px', borderRadius:'4px', verticalAlign:'top', fontWeight:'bold', marginLeft:'8px' },
-    subtitle: { fontSize:'0.8rem', color:'#71717a', margin:'4px 0 0 0' },
-    settingsBtn: { background:'#27272a', color:'#fff', border:'none', padding:'8px 15px', borderRadius:'4px', cursor:'pointer', fontWeight:'bold' },
-    settingsPanel: { background:'#18181b', padding:'15px', borderRadius:'8px', marginBottom:'15px', border:'1px solid #3f3f46' },
-    input: { background:'#000', border:'1px solid #3f3f46', color:'#fff', padding:'5px', borderRadius:'4px', marginLeft:'5px', width:'60px' },
+    // 主容器：手機版減少 padding，爭取空間
+    container: { 
+        padding: isMobile ? '10px' : '20px', 
+        background: '#09090b', 
+        color: '#f4f4f5', 
+        height: '100vh', 
+        width: '100vw', 
+        boxSizing: 'border-box', 
+        fontFamily: "'Roboto Mono', sans-serif", 
+        display: 'flex', 
+        flexDirection: 'column',
+        overflow: 'hidden' // 防止整個頁面滾動
+    },
     
-    // Explicit Grid Rows
-    gridRow1: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(140px, 1fr))', gap:'10px', marginBottom:'10px', flexShrink:0 },
-    gridRow2: { display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(140px, 1fr))', gap:'10px', marginBottom:'15px', flexShrink:0 },
+    // Header：手機版字體改小，排列緊湊
+    header: { 
+        display: 'flex', 
+        alignItems: 'center', 
+        gap: '10px', 
+        marginBottom: '10px', 
+        borderBottom: '2px solid #27272a', 
+        paddingBottom: '10px', 
+        flexShrink: 0 
+    },
+    statusDot: { width: '10px', height: '10px', background: '#4ade80', borderRadius: '50%' },
+    title: { fontSize: isMobile ? '1.1rem' : '1.5rem', fontWeight: '700', margin: 0 },
+    proBadge: { background: '#3b82f6', color: '#fff', fontSize: '0.6rem', padding: '2px 4px', borderRadius: '4px', verticalAlign: 'top', fontWeight: 'bold', marginLeft: '5px' },
+    subtitle: { fontSize: '0.7rem', color: '#71717a', margin: '2px 0 0 0' },
     
-    alertBox: { padding:'15px 20px', borderRadius:'8px', marginBottom:'15px', fontWeight:'bold', width:'100%', boxSizing:'border-box', flexShrink:0 },
-    tipBar: { background:'#1e293b', borderLeft:'4px solid #3b82f6', padding:'10px 15px', borderRadius:'4px', fontSize:'0.9rem', color:'#94a3b8', flexGrow:1, display:'flex', alignItems:'center' },
-    setupBox: { background:'#18181b', border:'1px solid #27272a', borderRadius:'4px', padding:'10px 15px', flexGrow:1.5 },
-    chartWrapper: { flexGrow:1, width:'100%', position:'relative', background:'#000', border:'2px solid #27272a', borderRadius:'8px', overflow:'hidden' },
-    chartContainer: { width:'100%', height:'100%' },
-    closeBtn: { background:'rgba(0,0,0,0.2)', border:'none', cursor:'pointer', padding:'2px 8px', borderRadius:'4px', fontWeight:'bold'},
-    historyPanel: { position:'absolute', top:'80px', right:'20px', width:'320px', background:'#18181b', border:'1px solid #3f3f46', borderRadius:'8px', padding:'15px', zIndex:100, boxShadow:'0 10px 25px rgba(0,0,0,0.5)'},
-    filterBtn: { background:'transparent', color:'#71717a', border:'1px solid #27272a', cursor:'pointer', fontSize:'0.75rem', borderRadius:'4px', padding:'4px 8px', minWidth:'40px' },
-    filterBtnActive: { background:'#3b82f6', color:'#fff', border:'1px solid #3b82f6', cursor:'pointer', fontSize:'0.75rem', borderRadius:'4px', padding:'4px 8px', minWidth:'40px', fontWeight:'bold' },
-    toggleBtn: { background:'transparent', color:'#3b82f6', border:'none', cursor:'pointer', fontSize:'0.8rem', textDecoration:'underline' },
-    dateInput: { background:'#000', border:'1px solid #3f3f46', color:'#fff', padding:'5px', borderRadius:'4px', fontSize:'0.8rem' }
+    // 按鈕：加大觸控區域
+    settingsBtn: { background: '#27272a', color: '#fff', border: 'none', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '1.2rem' },
+    settingsPanel: { background: '#18181b', padding: '15px', borderRadius: '8px', marginBottom: '10px', border: '1px solid #3f3f46' },
+    input: { background: '#000', border: '1px solid #3f3f46', color: '#fff', padding: '8px', borderRadius: '4px', marginLeft: '5px', width: '70px', fontSize: '1rem' }, // 手機輸入框加大
+
+    // [关键改动] Grid Layout -> Flex Wrap
+    // 讓卡片在手機上自動換行，或者變成橫向滑動
+    gridRow1: { 
+        display: 'grid', 
+        // 手機版：2列；電腦版：4列
+        gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', 
+        gap: '8px', 
+        marginBottom: '8px', 
+        flexShrink: 0 
+    },
+    gridRow2: { 
+        display: 'grid', 
+        // 手機版：2列；電腦版：2列
+        gridTemplateColumns: '1fr 1fr', 
+        gap: '8px', 
+        marginBottom: '10px', 
+        flexShrink: 0 
+    },
+    
+    alertBox: { padding: '10px', borderRadius: '8px', marginBottom: '10px', fontWeight: 'bold', width: '100%', boxSizing: 'border-box', flexShrink: 0 },
+    
+    // TipBar & SetupBox: 手機上垂直排列
+    tipBar: { 
+        background: '#1e293b', 
+        borderLeft: '4px solid #3b82f6', 
+        padding: '8px 12px', 
+        borderRadius: '4px', 
+        fontSize: '0.85rem', 
+        color: '#94a3b8', 
+        marginBottom: isMobile ? '5px' : '0',
+        flexGrow: 1, 
+        display: 'flex', 
+        alignItems: 'center' 
+    },
+    setupBox: { 
+        background: '#18181b', 
+        border: '1px solid #27272a', 
+        borderRadius: '4px', 
+        padding: '8px 12px', 
+        flexGrow: 1.5 
+    },
+
+    // [关键改动] 圖表容器
+    // 手機上讓它佔滿剩餘所有空間
+    chartWrapper: { 
+        flexGrow: 1, 
+        width: '100%', 
+        position: 'relative', 
+        background: '#000', 
+        border: '1px solid #27272a', 
+        borderRadius: '8px', 
+        overflow: 'hidden',
+        minHeight: isMobile ? '300px' : '400px' // 手機上保證最小高度
+    },
+    chartContainer: { width: '100%', height: '100%' },
+
+    closeBtn: { background: 'rgba(0,0,0,0.2)', border: 'none', cursor: 'pointer', padding: '5px 10px', borderRadius: '4px', fontWeight: 'bold', fontSize: '1.2rem'},
+    
+    // History Panel: 手機上全屏或者是個 Modal
+    historyPanel: { 
+        position: 'absolute', 
+        top: isMobile ? '60px' : '80px', 
+        right: isMobile ? '10px' : '20px', 
+        left: isMobile ? '10px' : 'auto', // 手機上左右撐滿
+        width: isMobile ? 'auto' : '320px', 
+        background: '#18181b', 
+        border: '1px solid #3f3f46', 
+        borderRadius: '8px', 
+        padding: '15px', 
+        zIndex: 100, 
+        boxShadow: '0 10px 30px rgba(0,0,0,0.8)',
+        maxHeight: '60vh'
+    },
+    filterBtn: { background: 'transparent', color: '#71717a', border: '1px solid #27272a', cursor: 'pointer', fontSize: '0.75rem', borderRadius: '4px', padding: '6px 10px', minWidth: '40px' },
+    filterBtnActive: { background: '#3b82f6', color: '#fff', border: '1px solid #3b82f6', cursor: 'pointer', fontSize: '0.75rem', borderRadius: '4px', padding: '6px 10px', minWidth: '40px', fontWeight: 'bold' },
+    toggleBtn: { background: 'transparent', color: '#3b82f6', border: 'none', cursor: 'pointer', fontSize: '0.8rem', textDecoration: 'underline' },
+    dateInput: { background: '#000', border: '1px solid #3f3f46', color: '#fff', padding: '8px', borderRadius: '4px', fontSize: '0.9rem', width: '100%', boxSizing: 'border-box' }
 };
 
 function StatCard({ label, value, unit, color, sub, isMain }) {
