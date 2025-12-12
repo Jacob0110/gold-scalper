@@ -2,13 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createChart, ColorType, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
 import { CONFIG } from './config'; 
 
-// --- Supabase Init (CDN Mode) ---
-// 使用 window.supabase 避免 Vite/tslib 依賴地獄
 const { createClient } = window.supabase || { createClient: () => null };
 const supabase = window.supabase ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY) : null;
 const STRATEGY = CONFIG.STRATEGY;
 
-// --- Helpers ---
+// --- Helpers (保持不變) ---
 const calculateRSI = (prices, period=14) => {
   if (!prices || prices.length < period + 1) return 50;
   let gains = 0, losses = 0;
@@ -50,13 +48,13 @@ const calculateATR = (h, l, c, p) => {
     for(let i=1; i<h.length; i++) trs.push(Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1])));
     return trs.slice(-Math.min(trs.length, p)).reduce((a,b)=>a+b,0)/Math.min(trs.length, p);
 };
-
 const formatHKTime = (ts) => new Date(ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Hong_Kong'});
-
 const toInputFormat = (ts) => {
     const d = new Date(ts);
     return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
 };
+
+
 
 export default function App() {
   const chartContainerRef = useRef(null);
@@ -66,7 +64,7 @@ export default function App() {
   const [activeSignal, setActiveSignal] = useState(null); 
   const [tradeHistory, setTradeHistory] = useState([]); 
   const [connectionStatus, setConnectionStatus] = useState('連線中...');
-  const [strategyTip, setStrategyTip] = useState("等待數據...");
+  const [strategyTip, setStrategyTip] = useState("等待金果 K 線...");
   const [tradeSetup, setTradeSetup] = useState(null);
   const [chartReady, setChartReady] = useState(false);
   
@@ -88,19 +86,17 @@ export default function App() {
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V25.0"; }, []);
+  useEffect(() => { document.title = "Jinguo Scalper V28.0"; }, []);
 
-  // --- Supabase Data Loading ---
+  // --- Supabase ---
   useEffect(() => {
     if(!supabase) return;
     const fetchHistory = async () => {
-        // [Fix] 抓取過去 30 天的數據，上限 2000 筆，確保隔夜數據不會消失
         const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-        
         const { data, error } = await supabase
             .from('trades')
             .select('*')
-            .gte('entry_time', thirtyDaysAgo) 
+            .gte('entry_time', thirtyDaysAgo)
             .order('entry_time', { ascending: false })
             .limit(2000);
 
@@ -109,42 +105,34 @@ export default function App() {
                 status: d.status,
                 price: d.entry_price,
                 exitPrice: d.exit_price,
-                // 格式化顯示時間
-                time: new Date(d.entry_time).toLocaleString('en-GB', {
-                    month: '2-digit', day: '2-digit', 
-                    hour: '2-digit', minute: '2-digit', hour12: false
-                }), 
+                time: new Date(d.entry_time).toLocaleString('en-GB', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }),
                 entryTimeRaw: new Date(d.entry_time).getTime()/1000,
                 timestamp: new Date(d.entry_time).getTime()
             }));
             setTradeHistory(mapped);
         }
     };
-    
     fetchHistory();
-    
-    const channel = supabase.channel('trades_realtime')
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, payload => { fetchHistory(); })
-        .subscribe();
-        
+    const channel = supabase.channel('trades_realtime').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, () => fetchHistory()).subscribe();
     return () => { supabase.removeChannel(channel); };
   }, []);
 
   const recordTrade = async (signal, resultStatus, exitPrice, candleTime) => {
       if(!supabase) return;
       await supabase.from('trades').insert({
-          type: signal.type,
-          status: resultStatus,
-          entry_price: signal.price,
-          exit_price: exitPrice,
-          tp: signal.tp,
-          sl: signal.sl,
-          entry_time: new Date(signal.timestamp).toISOString(),
-          exit_time: new Date(candleTime * 1000).toISOString()
+          type: signal.type, status: resultStatus, entry_price: signal.price, exit_price: exitPrice, tp: signal.tp, sl: signal.sl, entry_time: new Date(signal.timestamp).toISOString(), exit_time: new Date(candleTime * 1000).toISOString()
       });
   };
 
-  // --- Marker Effect (Safe Update) ---
+//   const testDBConnection = async () => {
+//       if(!supabase) { alert("Supabase Client not initialized!"); return; }
+//       console.log("Testing DB connection...");
+//       const fakeSignal = { type: 'TEST ENTRY', status: 'TEST', entry_price: 2000.00, exit_price: 2005.00, tp: 2010, sl: 1990, entry_time: new Date().toISOString(), exit_time: new Date().toISOString() };
+//       const { data, error } = await supabase.from('trades').insert(fakeSignal).select();
+//       if (error) alert(`寫入失敗: ${error.message}`); else alert("寫入成功！數據庫連接正常。");
+//   };
+
+  // --- Marker Effect ---
   useEffect(() => {
       if(chartReady && candleSeriesRef.current && tradeHistory.length > 0) {
           try {
@@ -156,10 +144,8 @@ export default function App() {
                   text: t.status === 'WIN' ? 'WIN' : 'LOSS',
               }));
               markers.sort((a,b) => a.time - b.time);
-              if (typeof candleSeriesRef.current.setMarkers === 'function') {
-                  candleSeriesRef.current.setMarkers(markers);
-              }
-          } catch (e) { console.warn("Marker update skipped"); }
+              if (typeof candleSeriesRef.current.setMarkers === 'function') candleSeriesRef.current.setMarkers(markers);
+          } catch (e) {}
       }
   }, [tradeHistory, chartReady]);
 
@@ -168,16 +154,14 @@ export default function App() {
       const recent = candles.slice(-STRATEGY.LOOKBACK_PERIOD);
       const low = Math.min(...recent.map(c => c.low));
       const high = Math.max(...recent.map(c => c.high));
-
       if (supportLineRef.current) series.removePriceLine(supportLineRef.current);
       if (resistanceLineRef.current) series.removePriceLine(resistanceLineRef.current);
-
       resistanceLineRef.current = series.createPriceLine({ price: high, color: '#ef4444', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'RESISTANCE' });
       supportLineRef.current = series.createPriceLine({ price: low, color: '#22c55e', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SUPPORT' });
       return { low, high };
   };
 
-  // --- Chart & WebSocket Logic ---
+  // --- Chart Logic ---
   useEffect(() => {
     if (!chartContainerRef.current) return;
     if(chartInstanceRef.current) { chartInstanceRef.current.remove(); chartInstanceRef.current = null; }
@@ -202,27 +186,16 @@ export default function App() {
             const raw = await res.json();
             const hist = raw.map(d => ({ time: d[0]/1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5]) }));
             candlesRef.current = hist;
-            
-            if(candleSeriesRef.current) {
-                candleSeriesRef.current.setData(hist);
-                setChartReady(true);
-            }
+            if(candleSeriesRef.current) { candleSeriesRef.current.setData(hist); setChartReady(true); }
             if(volumeSeriesRef.current) volumeSeriesRef.current.setData(hist.map(d => ({ time: d.time, value: d.volume, color: d.close >= d.open ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)' })));
             
             const emaData = calculateEMA(hist.map(d=>d.close), STRATEGY.EMA_PERIOD);
             if(emaSeriesRef.current) emaSeriesRef.current.setData(hist.map((d,i)=>({time:d.time, value:emaData[i]})).filter(d=>d.value!=null));
-            
             updateSupportResistance(candleSeriesRef.current, hist);
             setConnectionStatus('ONLINE');
 
-            // [Initial Zoom] Force 2-hour window
             const now = hist[hist.length-1].time;
-            // chart.timeScale().setVisibleRange({ from: now - (2 * 60 * 60), to: now + (10 * 60) });
-            chart.timeScale().setVisibleRange({ 
-                from: now - (STRATEGY.DEFAULT_ZOOM_HOURS * 3600), 
-                to: now + (10 * 60) 
-            });
-
+            chart.timeScale().setVisibleRange({ from: now - (STRATEGY.DEFAULT_ZOOM_HOURS * 3600), to: now + (10 * 60) });
 
             const ws = new WebSocket('wss://stream.binance.com:9443/ws/paxgusdt@kline_1m');
             ws.onmessage = (e) => {
@@ -235,15 +208,13 @@ export default function App() {
                 let h = candlesRef.current;
                 let ch = [...h];
                 if (ch[ch.length-1] && ch[ch.length-1].time===candle.time) ch[ch.length-1]=candle; else ch.push(candle);
-                candlesRef.current = ch; // Update ref for next cycle
+                candlesRef.current = ch;
                 
                 const closes = ch.map(c=>c.close);
                 const fullEMA = calculateEMA(closes, STRATEGY.EMA_PERIOD);
                 const curEMA = fullEMA[fullEMA.length-1];
                 if (curEMA && emaSeriesRef.current) emaSeriesRef.current.update({time:candle.time, value:curEMA});
-
                 const srLevels = updateSupportResistance(candleSeriesRef.current, ch);
-
                 const rsi = calculateRSI(closes, STRATEGY.RSI_PERIOD);
                 const volSMA = calculateSMA(h.map(c=>c.volume), STRATEGY.VOL_MA_PERIOD);
                 const volFactor = (candle.volume/(volSMA||1)).toFixed(2);
@@ -252,151 +223,181 @@ export default function App() {
 
                 setMarketData({ price: candle.close, rsi: rsi.toFixed(1), volFactor, ema: curEMA?curEMA.toFixed(2):0, macdHist: macd.hist, atr, support: srLevels?.low, resistance: srLevels?.high });
 
-                // [Zoom Fix] Keep forcing the 2-hour window on every update to prevent expansion
                 if(chartInstanceRef.current) {
                     const currentNow = candle.time;
-                    // chartInstanceRef.current.timeScale().setVisibleRange({ from: currentNow - (2 * 60 * 60), to: currentNow + (10 * 60) });
-                    chartInstanceRef.current.timeScale().setVisibleRange({ 
-                        from: currentNow - (STRATEGY.DEFAULT_ZOOM_HOURS * 3600), 
-                        to: currentNow + (10 * 60) 
-                    });
+                    chartInstanceRef.current.timeScale().setVisibleRange({ from: currentNow - (STRATEGY.DEFAULT_ZOOM_HOURS * 3600), to: currentNow + (10 * 60) });
                 }
 
-                // Trading Logic
+                // --- 🎯 V28.0 JINGUO STRATEGY ENGINE 🎯 ---
+                
+                // 1. 定義「金果 K 線」條件
+                const isGreen = candle.close > candle.open;
+                const bodySize = Math.abs(candle.close - candle.open);
+                const isBigBody = bodySize > atr * STRATEGY.JINGUO_BODY_SIZE; // 實體要夠大
+                const isVolumeOk = candle.volume > volSMA * STRATEGY.VOL_MULTIPLIER; // 要有量
+                const isTrendOk = candle.close > curEMA; // 要在均線之上
+                const isRsiOk = rsi >= STRATEGY.RSI_MIN && rsi <= STRATEGY.RSI_MAX; // RSI 健康區間
+
+                // 2. 計算 Jinguo Setup 數值
+                const jinguoEntry = (candle.open + (bodySize * STRATEGY.RETRACE_RATIO)); // 50% 回調位
+                const jinguoStop = candle.low - 0.5; // 結構性止損 (K線低點)
+                const riskPerShare = jinguoEntry - jinguoStop;
+                const jinguoTarget = jinguoEntry + (riskPerShare * STRATEGY.RISK_REWARD); // 1:1.5 盈虧比
+
+                // 3. 監控現有交易
                 if (activeSignalRef.current) {
                     const signal = activeSignalRef.current;
                     const elapsedMin = (Date.now() - signal.timestamp) / 60000;
+                    
+                    // 注意：這裡是模擬回測邏輯。真實交易中，這裡會檢查是否成交了 Limit Order
                     if (candle.high >= signal.tp) {
-                        recordTrade(signal, 'WIN', signal.tp, candle.time); 
-                        setActiveSignal(null);
-                        activeSignalRef.current = null;
+                        recordTrade(signal, 'WIN', signal.tp, candle.time); setActiveSignal(null); activeSignalRef.current = null;
                     } else if (candle.low <= signal.sl) {
-                        recordTrade(signal, 'LOSS', signal.sl, candle.time); 
-                        setActiveSignal(null);
-                        activeSignalRef.current = null;
-                    } else if (elapsedMin > 15) {
-                        setActiveSignal(null);
-                        activeSignalRef.current = null;
+                        recordTrade(signal, 'LOSS', signal.sl, candle.time); setActiveSignal(null); activeSignalRef.current = null;
+                    } else if (elapsedMin > 60) { // 60分鐘沒成交/沒結果就撤單
+                        setActiveSignal(null); activeSignalRef.current = null;
                     }
                 }
 
-                const dist = (candle.close - curEMA)/curEMA*100;
-                let tip = "監測中...", setup = null;
+                // 4. 計算倉位
                 const calcSize = (entry, stop) => {
                     const riskAmt = capital * (riskPct / 100);
-                    const riskPerShare = Math.abs(entry - stop);
-                    if(riskPerShare === 0) return 0;
-                    const riskBasedSize = riskAmt / riskPerShare;
-                    const walletBasedSize = (capital * leverage) / entry;
-                    return Math.min(riskBasedSize, walletBasedSize).toFixed(4);
+                    const risk = Math.abs(entry - stop);
+                    if(risk === 0) return 0;
+                    const riskBased = riskAmt / risk;
+                    const walletBased = (capital * leverage) / entry;
+                    return Math.min(riskBased, walletBased).toFixed(4);
                 };
 
-                const dynamicStop = Math.max(curEMA, srLevels?.low || curEMA - atr) - 0.5;
-                const dynamicTarget = (srLevels?.high > candle.close ? srLevels.high : candle.close + atr * 3).toFixed(2);
-                const limitEntry = Math.min(candle.close, curEMA + atr * 0.1); 
+                // 5. 生成提示與信號
+                let tip = "等待金果 K 線...";
+                let setup = null;
 
-                if (rsi > 80) tip = "⚠️ 危險：RSI 超買！";
-                else if (candle.close < curEMA) tip = "📉 跌勢：忍手。";
-                else if (dist > 0.15 && candle.volume < volSMA * STRATEGY.VOL_MULTIPLIER) {
-                    tip = `✋ 升過龍：等回調到 EMA (${curEMA.toFixed(2)})`;
-                } else {
-                    tip = `🎯 黃金位：準備掛單！`;
-                    setup = { type: 'LIMIT BUY', entry: limitEntry.toFixed(2), target: dynamicTarget, stop: dynamicStop.toFixed(2), size: calcSize(limitEntry, dynamicStop) };
-                }
-                setStrategyTip(tip);
-                setTradeSetup(setup);
+                if (isGreen && isBigBody && isVolumeOk && isTrendOk && isRsiOk) {
+                    tip = "🔥 發現金果 K 線！等待回調...";
+                    setup = { 
+                        type: 'LIMIT BUY', 
+                        entry: jinguoEntry.toFixed(2), 
+                        target: jinguoTarget.toFixed(2), 
+                        stop: jinguoStop.toFixed(2), 
+                        size: calcSize(jinguoEntry, jinguoStop) 
+                    };
 
-                if (k.x) {
-                    // New Candle Closed logic handled by `ch` logic above, 
-                    // Signal trigger logic:
-                    if (!activeSignalRef.current && rsi>STRATEGY.RSI_THRESHOLD && rsi<STRATEGY.RSI_OVERBOUGHT && candle.volume>volSMA*STRATEGY.VOL_MULTIPLIER && macd.hist>0) {
+                    // 當 K 線收盤確認 (k.x = true) 且沒有活躍訂單時，觸發信號
+                    if (k.x && !activeSignalRef.current) {
                         const newSignal = { 
-                            type: '🚀 爆升突破', variant: 'success', price: candle.close, time: formatHKTime(candle.time), reason: `Vol ${volFactor}x`,
-                            tp: parseFloat(dynamicTarget), sl: parseFloat(dynamicStop.toFixed(2)), timestamp: Date.now(), entryTimeRaw: candle.time
+                            type: '🔥 JINGUO SETUP', 
+                            variant: 'success', 
+                            price: jinguoEntry, // 掛單價
+                            time: formatHKTime(candle.time), 
+                            reason: `Body ${bodySize.toFixed(1)} > ATR`,
+                            tp: parseFloat(jinguoTarget.toFixed(2)), 
+                            sl: parseFloat(jinguoStop.toFixed(2)), 
+                            timestamp: Date.now(), 
+                            entryTimeRaw: candle.time
                         };
                         setActiveSignal(newSignal);
                         activeSignalRef.current = newSignal;
                     }
+                } else if (!isTrendOk) {
+                    tip = "📉 趨勢偏弱，觀望中。";
                 }
+
+                setStrategyTip(tip);
+                setTradeSetup(setup);
             };
             return ws;
         } catch (e) { setConnectionStatus('Err'); }
     };
     const wsPromise = initDataStream();
     
-    // [V23.0 Fix] Don't call fitContent in observer to avoid override
     const ro = new ResizeObserver(e => { 
         if(e[0].contentRect && chartInstanceRef.current) { 
-            chartInstanceRef.current.applyOptions({
-                width:e[0].contentRect.width, 
-                height:e[0].contentRect.height
-            }); 
-            // Removed chart.timeScale().fitContent() 
+            chartInstanceRef.current.applyOptions({ width:e[0].contentRect.width, height:e[0].contentRect.height }); 
         }
     });
     ro.observe(chartContainerRef.current);
-    
-    return () => { 
-        setChartReady(false); 
-        wsPromise.then(w=>w&&w.close()); 
-        if(chartInstanceRef.current) chartInstanceRef.current.remove(); 
-        ro.disconnect(); 
-        chartInstanceRef.current=null;
-        candleSeriesRef.current=null; 
-    };
+    return () => { setChartReady(false); wsPromise.then(w=>w&&w.close()); if(chartInstanceRef.current) chartInstanceRef.current.remove(); ro.disconnect(); chartInstanceRef.current=null; candleSeriesRef.current=null; };
   }, [capital, riskPct, leverage]);
 
-  const rsiStat = (r) => r>=80 ? {c:'#ef4444',t:'⚠️ 危險'} : (r>=55 ? {c:'#4ade80',t:'🚀 強勢'} : {c:'#94a3b8',t:'⚪ 弱勢'});
+  // UI Variables
+  const rsiStat = (r) => r>=80 ? {c:'#ef4444',t:'⚠️ 超買'} : (r>=55 ? {c:'#4ade80',t:'🚀 強勢'} : {c:'#94a3b8',t:'⚪ 盤整'});
   const rs = rsiStat(marketData.rsi);
   const riskAmt = (capital * (riskPct/100)).toFixed(0);
   const buyingPower = (capital * leverage).toFixed(0); 
 
+  // Filter Logic (Fixed V27.1)
   const filteredHistory = tradeHistory.filter(t => {
+      if (!t.timestamp) return false;
       if (filterMode === 'preset') {
           if (presetPeriod === 0) return true;
           const elapsedMin = (Date.now() - t.timestamp) / (1000 * 60);
-          return elapsedMin <= presetPeriod;
+          return elapsedMin >= -1 && elapsedMin <= presetPeriod;
       } else {
           return t.timestamp >= customRange.start && t.timestamp <= customRange.end;
       }
   });
-
   const wins = filteredHistory.filter(t => t.status === 'WIN').length;
   const losses = filteredHistory.filter(t => t.status === 'LOSS').length;
   const winRate = (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : 0;
-
-  const presets = [
-      { label: '30M', val: 30 }, { label: '1H', val: 60 }, { label: '4H', val: 240 },
-      { label: '1D', val: 1440 }, { label: '1W', val: 10080 }, { label: '1M', val: 43200 }, { label: 'All', val: 0 }
-  ];
+  const presets = [{ label: '30M', val: 30 }, { label: '1H', val: 60 }, { label: '4H', val: 240 }, { label: '1D', val: 1440 }, { label: 'All', val: 0 }];
 
   const clearHistory = async () => {
       if(!supabase) return;
       if (window.confirm('確定要清除所有交易記錄？這會清空數據庫！')) {
-          await supabase.from('trades').delete().neq('id', 0); 
-          setTradeHistory([]);
+          await supabase.from('trades').delete().neq('id', 0); setTradeHistory([]);
       }
   };
 
+  const isMobile = window.innerWidth < 768;
+  const styles = {
+      container: { padding: isMobile ? '10px' : '20px', background: '#09090b', color: '#f4f4f5', height: '100vh', width: '100vw', boxSizing: 'border-box', fontFamily: "'Roboto Mono', sans-serif", display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+      header: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px', borderBottom: '2px solid #27272a', paddingBottom: '10px', flexShrink: 0 },
+      statusDot: { width: '10px', height: '10px', background: '#4ade80', borderRadius: '50%' },
+      title: { fontSize: isMobile ? '1.1rem' : '1.5rem', fontWeight: '700', margin: 0 },
+      proBadge: { background: '#f59e0b', color: '#000', fontSize: '0.6rem', padding: '2px 4px', borderRadius: '4px', verticalAlign: 'top', fontWeight: 'bold', marginLeft: '5px' },
+      subtitle: { fontSize: '0.7rem', color: '#71717a', margin: '2px 0 0 0' },
+      settingsBtn: { background: '#27272a', color: '#fff', border: 'none', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '1rem', fontWeight:'bold' },
+      settingsPanel: { background: '#18181b', padding: '15px', borderRadius: '8px', marginBottom: '10px', border: '1px solid #3f3f46' },
+      input: { background: '#000', border: '1px solid #3f3f46', color: '#fff', padding: '8px', borderRadius: '4px', marginLeft: '5px', width: '70px', fontSize: '1rem' },
+      gridRow1: { display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: '8px', marginBottom: '8px', flexShrink: 0 },
+      gridRow2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px', flexShrink: 0 },
+      alertBox: { padding: '10px', borderRadius: '8px', marginBottom: '10px', fontWeight: 'bold', width: '100%', boxSizing: 'border-box', flexShrink: 0 },
+      tipBar: { background: '#1e293b', borderLeft: '4px solid #3b82f6', padding: '8px 12px', borderRadius: '4px', fontSize: '0.85rem', color: '#94a3b8', marginBottom: isMobile ? '5px' : '0', flexGrow: 1, display: 'flex', alignItems: 'center' },
+      setupBox: { background: '#18181b', border: '1px solid #27272a', borderRadius: '4px', padding: '8px 12px', flexGrow: 1.5 },
+      chartWrapper: { flexGrow: 1, width: '100%', position: 'relative', background: '#000', border: '1px solid #27272a', borderRadius: '8px', overflow: 'hidden', minHeight: isMobile ? '300px' : '400px' },
+      chartContainer: { width: '100%', height: '100%' },
+      closeBtn: { background: 'rgba(0,0,0,0.2)', border: 'none', cursor: 'pointer', padding: '5px 10px', borderRadius: '4px', fontWeight: 'bold', fontSize: '1.2rem'},
+      historyPanel: { position: 'absolute', top: isMobile ? '60px' : '80px', right: isMobile ? '10px' : '20px', left: isMobile ? '10px' : 'auto', width: isMobile ? 'auto' : '320px', background: '#18181b', border: '1px solid #3f3f46', borderRadius: '8px', padding: '15px', zIndex: 100, boxShadow: '0 10px 30px rgba(0,0,0,0.8)', maxHeight: '60vh' },
+      filterBtn: { background: 'transparent', color: '#71717a', border: '1px solid #27272a', cursor: 'pointer', fontSize: '0.75rem', borderRadius: '4px', padding: '6px 10px', minWidth: '40px' },
+      filterBtnActive: { background: '#3b82f6', color: '#fff', border: '1px solid #3b82f6', cursor: 'pointer', fontSize: '0.75rem', borderRadius: '4px', padding: '6px 10px', minWidth: '40px', fontWeight: 'bold' },
+      toggleBtn: { background: 'transparent', color: '#3b82f6', border: 'none', cursor: 'pointer', fontSize: '0.8rem', textDecoration: 'underline' },
+      dateInput: { background: '#000', border: '1px solid #3f3f46', color: '#fff', padding: '8px', borderRadius: '4px', fontSize: '0.9rem', width: '100%', boxSizing: 'border-box' }
+  };
+
+  function StatCard({ label, value, unit, color, sub, isMain }) {
+    return (
+        <div style={{ background: '#18181b', padding: '15px', borderRadius: '8px', border: '1px solid #27272a', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '5px' }}>{label}</div>
+            <div style={{ fontSize: isMain ? '2rem' : '1.5rem', fontWeight: '700', color: color, fontFamily: "'Roboto Mono', monospace" }}>{unit==='$'?unit:''}{value}{unit==='x'?unit:''}<span style={{fontSize:'0.8rem', color: color, marginLeft:'5px', fontWeight:'normal', opacity:0.8}}>{sub}</span></div>
+        </div>
+    );
+  }
+
   return (
     <div style={styles.container}>
-      <style>{`html,body,#root{margin:0;padding:0;width:100%;height:100%;background:#09090b;overflow:hidden}.pulse{animation:pulse 2s infinite}@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,0.7)}70%{box-shadow:0 0 0 10px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}`}</style>
-      
       <div style={styles.header}>
         <div style={styles.statusDot} className={connectionStatus==='ONLINE'?'pulse':''}></div>
         <div style={{flexGrow:1}}>
-            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>CLOUD</span></h1>
-            <p style={styles.subtitle}>PAXG/USDT • 1M • {connectionStatus} • {supabase ? "DB Connected" : "DB Missing"}</p>
+            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>JINGUO V28</span></h1>
+            <p style={styles.subtitle}>PAXG/USDT • 1M • {supabase ? "DB OK" : "DB Missing"}</p>
         </div>
-        
-        <div style={{display:'flex', gap:'10px', marginRight:'15px', alignItems:'center'}}>
-             <div onClick={()=>setShowHistory(!showHistory)} style={{cursor:'pointer', background:'#27272a', padding:'5px 15px', borderRadius:'4px', border:'1px solid #3f3f46', fontSize:'0.9rem', color:'#fff'}}>
-                 <span style={{color:'#94a3b8', marginRight:'5px'}}>
-                     {filterMode==='preset' ? (presets.find(p=>p.val===presetPeriod)?.label + ' Result:') : 'Custom Result:'}
-                 </span>
-                 <span style={{color:winRate>=50?'#4ade80':'#ef4444', fontWeight:'bold'}}>{winRate}% ({wins}W-{losses}L)</span>
+        <div style={{display:'flex', gap:'10px', marginRight:'5px', alignItems:'center'}}>
+             <div onClick={()=>setShowHistory(!showHistory)} style={{cursor:'pointer', background:'#27272a', padding:'5px 10px', borderRadius:'4px', border:'1px solid #3f3f46', fontSize:'0.8rem', color:'#fff'}}>
+                 <span style={{color:winRate>=50?'#4ade80':'#ef4444', fontWeight:'bold'}}>{winRate}% ({wins}W)</span>
              </div>
         </div>
+        {/* <button onClick={testDBConnection} style={{...styles.settingsBtn, background:'#3b82f6', fontSize:'0.8rem', padding:'6px'}}>Test</button> */}
         <button onClick={()=>setShowSettings(!showSettings)} style={styles.settingsBtn}>⚙️</button>
       </div>
 
@@ -405,10 +406,8 @@ export default function App() {
               <div style={{display:'flex', gap:'15px', alignItems:'center', flexWrap:'wrap'}}>
                   <label>本金: <input type="number" value={capital} onChange={e=>setCapital(Number(e.target.value))} style={styles.input} /></label>
                   <label>Risk%: <input type="number" value={riskPct} onChange={e=>setRiskPct(Number(e.target.value))} style={styles.input} /></label>
-                  <label>槓桿(x): <input type="number" value={leverage} onChange={e=>setLeverage(Number(e.target.value))} style={styles.input} /></label>
-                  <span style={{color:'#ef4444', fontWeight:'bold', fontSize:'0.8rem'}}>Risk: -${riskAmt}</span>
-                  <span style={{color:'#3b82f6', fontWeight:'bold', fontSize:'0.8rem'}}>Power: ${buyingPower}</span>
-                  <button onClick={clearHistory} style={{background:'#ef4444', color:'#fff', border:'none', padding:'5px 10px', borderRadius:'4px', cursor:'pointer', fontSize:'0.75rem', fontWeight:'bold'}}>清空數據庫</button>
+                  <label>槓桿: <input type="number" value={leverage} onChange={e=>setLeverage(Number(e.target.value))} style={styles.input} /></label>
+                  <button onClick={clearHistory} style={{background:'#ef4444', color:'#fff', border:'none', padding:'5px 10px', borderRadius:'4px', cursor:'pointer', fontWeight:'bold'}}>Reset DB</button>
               </div>
           </div>
       )}
@@ -418,66 +417,39 @@ export default function App() {
               <div style={{borderBottom:'1px solid #3f3f46', paddingBottom:'10px', marginBottom:'10px'}}>
                   <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px'}}>
                       <strong>交易記錄 ({tradeHistory.length})</strong>
-                      <button onClick={()=>setFilterMode(filterMode==='preset'?'custom':'preset')} style={styles.toggleBtn}>
-                          {filterMode==='preset' ? '切換自定義' : '切換預設'}
-                      </button>
+                      <button onClick={()=>setFilterMode(filterMode==='preset'?'custom':'preset')} style={styles.toggleBtn}>{filterMode==='preset'?'自定義':'預設'}</button>
                   </div>
                   {filterMode === 'preset' ? (
                       <div style={{display:'flex', gap:'5px', flexWrap:'wrap'}}>
-                          {presets.map(p => (
-                              <button key={p.label} onClick={()=>setPresetPeriod(p.val)} 
-                                  style={presetPeriod===p.val?styles.filterBtnActive:styles.filterBtn}>
-                                  {p.label}
-                              </button>
-                          ))}
+                          {presets.map(p => (<button key={p.label} onClick={()=>setPresetPeriod(p.val)} style={presetPeriod===p.val?styles.filterBtnActive:styles.filterBtn}>{p.label}</button>))}
                       </div>
                   ) : (
                       <div style={{display:'flex', flexDirection:'column', gap:'5px'}}>
-                          <div style={{display:'flex', alignItems:'center', justifyContent:'space-between'}}>
-                              <span style={{fontSize:'0.8rem', color:'#94a3b8'}}>From:</span>
-                              <input type="datetime-local" style={styles.dateInput} 
-                                  value={toInputFormat(customRange.start)}
-                                  onChange={e=>setCustomRange({...customRange, start: new Date(e.target.value).getTime()})} />
-                          </div>
-                          <div style={{display:'flex', alignItems:'center', justifyContent:'space-between'}}>
-                              <span style={{fontSize:'0.8rem', color:'#94a3b8'}}>To:</span>
-                              <input type="datetime-local" style={styles.dateInput}
-                                  value={toInputFormat(customRange.end)}
-                                  onChange={e=>setCustomRange({...customRange, end: new Date(e.target.value).getTime()})} />
-                          </div>
+                          <input type="datetime-local" style={styles.dateInput} value={toInputFormat(customRange.start)} onChange={e=>setCustomRange({...customRange, start: new Date(e.target.value).getTime()})} />
+                          <input type="datetime-local" style={styles.dateInput} value={toInputFormat(customRange.end)} onChange={e=>setCustomRange({...customRange, end: new Date(e.target.value).getTime()})} />
                       </div>
                   )}
               </div>
               <div style={{maxHeight:'300px', overflowY:'auto'}}>
-                  {filteredHistory.length === 0 ? <div style={{color:'#71717a', textAlign:'center', padding:'20px'}}>暫無記錄</div> : 
-                   filteredHistory.map((t, i) => (
+                  {filteredHistory.map((t, i) => (
                       <div key={i} style={{display:'flex', justifyContent:'space-between', fontSize:'0.85rem', padding:'8px 0', borderBottom:'1px solid #27272a'}}>
-                          <div>
-                              <span style={{color:t.status==='WIN'?'#4ade80':'#ef4444', fontWeight:'bold', marginRight:'10px'}}>{t.status}</span>
-                              <span style={{color:'#94a3b8'}}>{t.time}</span>
-                          </div>
-                          <div style={{textAlign:'right'}}>
-                              <div style={{color:'#fff'}}>Entry: {t.price}</div>
-                              <div style={{color:'#71717a', fontSize:'0.75rem'}}>Exit: {t.exitPrice}</div>
-                          </div>
+                          <div><span style={{color:t.status==='WIN'?'#4ade80':'#ef4444', fontWeight:'bold', marginRight:'10px'}}>{t.status}</span><span style={{color:'#94a3b8'}}>{t.time}</span></div>
+                          <div style={{textAlign:'right', paddingRight:'15px'}}><div style={{color:'#fff'}}>{t.price}<span>, {t.exitPrice}</span></div></div>
                       </div>
                   ))}
               </div>
           </div>
       )}
 
-      {/* Grid Layout Row 1: Main Stats */}
       <div style={styles.gridRow1}>
         <StatCard label="現價" value={marketData.price.toFixed(2)} unit="$" color="#FFFFFF" isMain={true} />
-        <StatCard label="RSI (14)" value={marketData.rsi || 0} color={rs.c} sub={rs.t} />
-        <StatCard label="成交倍數" value={marketData.volFactor || "0.00"} unit="x" color={parseFloat(marketData.volFactor)>1.5?'#4ade80':'#94a3b8'} sub={parseFloat(marketData.volFactor)>1.5?"🚀 爆量":"💤 縮量"} />
-        <StatCard label="EMA (20)" value={marketData.ema || 0} unit="$" color="#fbbf24" sub="Trend" />
+        <StatCard label="RSI" value={marketData.rsi || 0} color={rs.c} sub={rs.t} />
+        <StatCard label="Vol" value={marketData.volFactor || "0.00"} unit="x" color={parseFloat(marketData.volFactor)>1.5?'#4ade80':'#94a3b8'} sub={parseFloat(marketData.volFactor)>STRATEGY.VOL_MULTIPLIER?"🔥":"💤"} />
+        <StatCard label="EMA" value={marketData.ema || 0} unit="$" color="#fbbf24" sub="Trend" />
       </div>
-      
-      {/* Grid Layout Row 2: SR Levels */}
       <div style={styles.gridRow2}>
-        <StatCard label="支撐 (Low 50)" value={marketData.support?.toFixed(2) || "---"} unit="$" color="#22c55e" sub="Strong Support" />
-        <StatCard label="阻力 (High 50)" value={marketData.resistance?.toFixed(2) || "---"} unit="$" color="#ef4444" sub="Key Resistance" />
+        <StatCard label="支撐 (Low 50)" value={marketData.support?.toFixed(2) || "---"} unit="$" color="#22c55e" sub="Sup" />
+        <StatCard label="阻力 (High 50)" value={marketData.resistance?.toFixed(2) || "---"} unit="$" color="#ef4444" sub="Res" />
       </div>
 
       {activeSignal && (
@@ -486,30 +458,25 @@ export default function App() {
                 <span style={{fontSize: '1.5rem'}}>🚀</span>
                 <div style={{flexGrow:1}}>
                     <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
-                        <strong style={{fontSize:'1.1rem',color:'#000'}}>ACTIVE TRADE: {activeSignal.price}</strong>
+                        <strong style={{fontSize:'1.1rem',color:'#000'}}>JINGUO SIGNAL: {activeSignal.price}</strong>
                         <button onClick={()=>{setActiveSignal(null); activeSignalRef.current=null;}} style={styles.closeBtn}>✕</button>
                     </div>
                     <div style={{marginTop:'5px', paddingTop:'5px', borderTop:'1px solid rgba(0,0,0,0.1)', display:'flex', gap:'15px', fontSize:'0.95rem', color:'#000', fontWeight:'bold'}}>
-                             <span>🎯 TP: {activeSignal.tp}</span>
-                             <span>🛑 SL: {activeSignal.sl}</span>
+                             <span>🎯 {activeSignal.tp}</span><span>🛑 {activeSignal.sl}</span>
                     </div>
                 </div>
             </div>
         </div>
       )}
 
-      <div style={{display:'flex', gap:'10px', marginBottom:'15px', alignItems:'stretch'}}>
+      <div style={{display: 'flex', gap: '10px', marginBottom: '10px', alignItems: 'stretch', flexDirection: isMobile ? 'column' : 'row'}}>
           <div style={styles.tipBar}><span>💡 教練:</span> <span style={{color:'#fff',fontWeight:'bold',marginLeft:'5px'}}>{strategyTip}</span></div>
           {tradeSetup && (
              <div style={styles.setupBox}>
-                 <div style={{fontSize:'0.7rem', color:'#94a3b8', marginBottom:'5px', display:'flex', justifyContent:'space-between'}}>
-                     <span>建議部署 ({tradeSetup.type})</span>
-                     <span style={{color:'#ef4444'}}>Risk: ${riskAmt}</span>
-                 </div>
+                 <div style={{fontSize:'0.7rem', color:'#94a3b8', marginBottom:'5px', display:'flex', justifyContent:'space-between'}}><span>建議部署</span><span style={{color:'#ef4444'}}>Risk: ${riskAmt}</span></div>
                  <div style={{display:'flex', gap:'15px', fontSize:'0.9rem', fontWeight:'bold', alignItems:'center'}}>
-                     <span style={{color:'#fff', background:'#27272a', padding:'2px 6px', borderRadius:'4px'}}>🛒 買 {tradeSetup.size} 股</span>
+                     <span style={{color:'#fff', background:'#27272a', padding:'2px 6px', borderRadius:'4px'}}>掛 {tradeSetup.size} 股</span>
                      <span style={{color:'#3b82f6'}}>@ {tradeSetup.entry}</span>
-                     <span style={{color:'#4ade80'}}>🎯 {tradeSetup.target}</span>
                      <span style={{color:'#ef4444'}}>🛑 {tradeSetup.stop}</span>
                  </div>
              </div>
@@ -519,127 +486,4 @@ export default function App() {
       <div style={styles.chartWrapper}><div ref={chartContainerRef} style={styles.chartContainer} /></div>
     </div>
   );
-}
-const isMobile = window.innerWidth < 768; // 簡單判斷是否為手機
-const styles = {
-    // 主容器：手機版減少 padding，爭取空間
-    container: { 
-        padding: isMobile ? '10px' : '20px', 
-        background: '#09090b', 
-        color: '#f4f4f5', 
-        height: '100vh', 
-        width: '100vw', 
-        boxSizing: 'border-box', 
-        fontFamily: "'Roboto Mono', sans-serif", 
-        display: 'flex', 
-        flexDirection: 'column',
-        overflow: 'hidden' // 防止整個頁面滾動
-    },
-    
-    // Header：手機版字體改小，排列緊湊
-    header: { 
-        display: 'flex', 
-        alignItems: 'center', 
-        gap: '10px', 
-        marginBottom: '10px', 
-        borderBottom: '2px solid #27272a', 
-        paddingBottom: '10px', 
-        flexShrink: 0 
-    },
-    statusDot: { width: '10px', height: '10px', background: '#4ade80', borderRadius: '50%' },
-    title: { fontSize: isMobile ? '1.1rem' : '1.5rem', fontWeight: '700', margin: 0 },
-    proBadge: { background: '#3b82f6', color: '#fff', fontSize: '0.6rem', padding: '2px 4px', borderRadius: '4px', verticalAlign: 'top', fontWeight: 'bold', marginLeft: '5px' },
-    subtitle: { fontSize: '0.7rem', color: '#71717a', margin: '2px 0 0 0' },
-    
-    // 按鈕：加大觸控區域
-    settingsBtn: { background: '#27272a', color: '#fff', border: 'none', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '1.2rem' },
-    settingsPanel: { background: '#18181b', padding: '15px', borderRadius: '8px', marginBottom: '10px', border: '1px solid #3f3f46' },
-    input: { background: '#000', border: '1px solid #3f3f46', color: '#fff', padding: '8px', borderRadius: '4px', marginLeft: '5px', width: '70px', fontSize: '1rem' }, // 手機輸入框加大
-
-    // [关键改动] Grid Layout -> Flex Wrap
-    // 讓卡片在手機上自動換行，或者變成橫向滑動
-    gridRow1: { 
-        display: 'grid', 
-        // 手機版：2列；電腦版：4列
-        gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', 
-        gap: '8px', 
-        marginBottom: '8px', 
-        flexShrink: 0 
-    },
-    gridRow2: { 
-        display: 'grid', 
-        // 手機版：2列；電腦版：2列
-        gridTemplateColumns: '1fr 1fr', 
-        gap: '8px', 
-        marginBottom: '10px', 
-        flexShrink: 0 
-    },
-    
-    alertBox: { padding: '10px', borderRadius: '8px', marginBottom: '10px', fontWeight: 'bold', width: '100%', boxSizing: 'border-box', flexShrink: 0 },
-    
-    // TipBar & SetupBox: 手機上垂直排列
-    tipBar: { 
-        background: '#1e293b', 
-        borderLeft: '4px solid #3b82f6', 
-        padding: '8px 12px', 
-        borderRadius: '4px', 
-        fontSize: '0.85rem', 
-        color: '#94a3b8', 
-        marginBottom: isMobile ? '5px' : '0',
-        flexGrow: 1, 
-        display: 'flex', 
-        alignItems: 'center' 
-    },
-    setupBox: { 
-        background: '#18181b', 
-        border: '1px solid #27272a', 
-        borderRadius: '4px', 
-        padding: '8px 12px', 
-        flexGrow: 1.5 
-    },
-
-    // [关键改动] 圖表容器
-    // 手機上讓它佔滿剩餘所有空間
-    chartWrapper: { 
-        flexGrow: 1, 
-        width: '100%', 
-        position: 'relative', 
-        background: '#000', 
-        border: '1px solid #27272a', 
-        borderRadius: '8px', 
-        overflow: 'hidden',
-        minHeight: isMobile ? '300px' : '400px' // 手機上保證最小高度
-    },
-    chartContainer: { width: '100%', height: '100%' },
-
-    closeBtn: { background: 'rgba(0,0,0,0.2)', border: 'none', cursor: 'pointer', padding: '5px 10px', borderRadius: '4px', fontWeight: 'bold', fontSize: '1.2rem'},
-    
-    // History Panel: 手機上全屏或者是個 Modal
-    historyPanel: { 
-        position: 'absolute', 
-        top: isMobile ? '60px' : '80px', 
-        right: isMobile ? '10px' : '20px', 
-        left: isMobile ? '10px' : 'auto', // 手機上左右撐滿
-        width: isMobile ? 'auto' : '320px', 
-        background: '#18181b', 
-        border: '1px solid #3f3f46', 
-        borderRadius: '8px', 
-        padding: '15px', 
-        zIndex: 100, 
-        boxShadow: '0 10px 30px rgba(0,0,0,0.8)',
-        maxHeight: '60vh'
-    },
-    filterBtn: { background: 'transparent', color: '#71717a', border: '1px solid #27272a', cursor: 'pointer', fontSize: '0.75rem', borderRadius: '4px', padding: '6px 10px', minWidth: '40px' },
-    filterBtnActive: { background: '#3b82f6', color: '#fff', border: '1px solid #3b82f6', cursor: 'pointer', fontSize: '0.75rem', borderRadius: '4px', padding: '6px 10px', minWidth: '40px', fontWeight: 'bold' },
-    toggleBtn: { background: 'transparent', color: '#3b82f6', border: 'none', cursor: 'pointer', fontSize: '0.8rem', textDecoration: 'underline' },
-    dateInput: { background: '#000', border: '1px solid #3f3f46', color: '#fff', padding: '8px', borderRadius: '4px', fontSize: '0.9rem', width: '100%', boxSizing: 'border-box' }
-};
-
-function StatCard({ label, value, unit, color, sub, isMain }) {
-    return (
-        <div style={{ background: '#18181b', padding: '15px', borderRadius: '8px', border: '1px solid #27272a', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '5px' }}>{label}</div>
-            <div style={{ fontSize: isMain ? '2rem' : '1.5rem', fontWeight: '700', color: color, fontFamily: "'Roboto Mono', monospace" }}>{unit==='$'?unit:''}{value}{unit==='x'?unit:''}<span style={{fontSize:'0.8rem', color: color, marginLeft:'5px', fontWeight:'normal', opacity:0.8}}>{sub}</span></div>
-        </div>
-    );
 }
