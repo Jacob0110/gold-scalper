@@ -2,23 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createChart, ColorType, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
 import { CONFIG } from './config'; 
 
+// --- Supabase Init ---
 const { createClient } = window.supabase || { createClient: () => null };
 const supabase = window.supabase ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY) : null;
 const STRATEGY = CONFIG.STRATEGY;
 
-// --- Helpers (保持不變) ---
-const calculateRSI = (prices, period=14) => {
-  if (!prices || prices.length < period + 1) return 50;
-  let gains = 0, losses = 0;
-  for (let i = prices.length - period; i < prices.length; i++) {
-    const diff = prices[i] - prices[i - 1];
-    if (diff >= 0) gains += diff; else losses -= diff;
-  }
-  const avgGain = (gains / period) || 0;
-  const avgLoss = (losses / period) || 0;
-  if (avgLoss === 0) return 100;
-  return 100 - (100 / (1 + (avgGain / avgLoss)));
-};
+// --- Indicators (Standard) ---
 const calculateSMA = (data, period) => {
   if (!data || data.length === 0) return 0;
   const slice = data.slice(-Math.min(data.length, period));
@@ -31,16 +20,14 @@ const calculateEMA = (data, period) => {
     for (let i = period; i < data.length; i++) ema.push(data[i] * k + ema[ema.length - 1] * (1 - k));
     return new Array(period - 1).fill(null).concat(ema);
 };
-const calculateMACD = (data, f, s, sig) => {
-    if (!data || data.length < s) return { macd: 0, signal: 0, hist: 0 };
-    const fast = calculateEMA(data, f);
-    const slow = calculateEMA(data, s);
-    const macdLine = data.map((_, i) => (fast[i]!=null && slow[i]!=null) ? fast[i]-slow[i] : null);
-    const validMacd = macdLine.filter(v => v !== null);
-    const signalLine = calculateEMA(validMacd, sig);
-    const lastM = macdLine[macdLine.length-1]||0;
-    const lastS = signalLine[signalLine.length-1]||0;
-    return { macd: lastM, signal: lastS, hist: lastM - lastS };
+const calculateRSI = (prices, period=14) => {
+  if (!prices || prices.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = prices.length - period; i < prices.length; i++) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff >= 0) gains += diff; else losses -= diff;
+  }
+  return 100 - (100 / (1 + ((gains / period) / (losses / period || 1))));
 };
 const calculateATR = (h, l, c, p) => {
     if (!h || h.length < p+1) return 1;
@@ -48,32 +35,52 @@ const calculateATR = (h, l, c, p) => {
     for(let i=1; i<h.length; i++) trs.push(Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1])));
     return trs.slice(-Math.min(trs.length, p)).reduce((a,b)=>a+b,0)/Math.min(trs.length, p);
 };
-const formatHKTime = (ts) => new Date(ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Hong_Kong'});
-const toInputFormat = (ts) => {
-    const d = new Date(ts);
-    return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
+const calculateADX = (highs, lows, closes, period) => {
+    if(highs.length < period * 2) return 0;
+    let tr = [], dmPlus = [], dmMinus = [];
+    for(let i=1; i<highs.length; i++) {
+        tr.push(Math.max(highs[i]-lows[i], Math.abs(highs[i]-closes[i-1]), Math.abs(lows[i]-closes[i-1])));
+        dmPlus.push(highs[i]-highs[i-1] > lows[i-1]-lows[i] ? Math.max(highs[i]-highs[i-1], 0) : 0);
+        dmMinus.push(lows[i-1]-lows[i] > highs[i]-highs[i-1] ? Math.max(lows[i-1]-lows[i], 0) : 0);
+    }
+    const smooth = (data, p) => {
+        let res = [data.slice(0,p).reduce((a,b)=>a+b,0)]; 
+        for(let i=p; i<data.length; i++) res.push(res[res.length-1] - (res[res.length-1]/p) + data[i]);
+        return res;
+    };
+    const trS = smooth(tr, period);
+    const dmPS = smooth(dmPlus, period);
+    const dmMS = smooth(dmMinus, period);
+    let dx = [];
+    for(let i=0; i<trS.length; i++) {
+        const diPlus = 100 * (dmPS[i]/trS[i]);
+        const diMinus = 100 * (dmMS[i]/trS[i]);
+        dx.push(100 * Math.abs(diPlus - diMinus) / (diPlus + diMinus));
+    }
+    return (dx.slice(-period).reduce((a,b)=>a+b,0)/period) || 0;
 };
 
-
+const formatHKTime = (ts) => new Date(ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Hong_Kong'});
+const toInputFormat = (ts) => { const d = new Date(ts); return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().slice(0, 16); };
 
 export default function App() {
   const chartContainerRef = useRef(null);
   const chartInstanceRef = useRef(null);
   
-  const [marketData, setMarketData] = useState({ price: 0, rsi: 0, volFactor: "0.00", ema: 0, macdHist: 0, atr: 0, support: 0, resistance: 0 });
+  const [marketData, setMarketData] = useState({ price: 0, rsi: 0, adx: 0, volFactor: "0.00", emaFast: 0, emaSlow: 0, support: 0, resistance: 0 });
   const [activeSignal, setActiveSignal] = useState(null); 
   const [tradeHistory, setTradeHistory] = useState([]); 
   const [connectionStatus, setConnectionStatus] = useState('連線中...');
-  const [strategyTip, setStrategyTip] = useState("等待金果 K 線...");
+  const [strategyTip, setStrategyTip] = useState("初始化...");
   const [tradeSetup, setTradeSetup] = useState(null);
   const [chartReady, setChartReady] = useState(false);
+  const [backtestResult, setBacktestResult] = useState(null); // Backtest Stats UI
   
   const [capital, setCapital] = useState(1000); 
   const [riskPct, setRiskPct] = useState(2);     
   const [leverage, setLeverage] = useState(1);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false); 
-  
   const [filterMode, setFilterMode] = useState('preset'); 
   const [presetPeriod, setPresetPeriod] = useState(0); 
   const [customRange, setCustomRange] = useState({ start: Date.now() - 86400000, end: Date.now() }); 
@@ -81,39 +88,114 @@ export default function App() {
   const candlesRef = useRef([]); 
   const candleSeriesRef = useRef(null);
   const volumeSeriesRef = useRef(null);
-  const emaSeriesRef = useRef(null);
+  const emaFastSeriesRef = useRef(null);
+  const emaSlowSeriesRef = useRef(null);
   const supportLineRef = useRef(null);
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
 
-  useEffect(() => { document.title = "Jinguo Scalper V28.0"; }, []);
+  useEffect(() => { document.title = "Jinguo V33.0 Complete"; }, []);
 
-  // --- Supabase ---
+  // --- Instant Backtest Logic ---
+  const runBacktest = () => {
+    if (!candlesRef.current || candlesRef.current.length < 100) return;
+    setBacktestResult(null);
+    setTimeout(() => {
+        const candles = candlesRef.current;
+        let balance = capital;
+        let trades = [];
+        let pendingOrder = null;
+        let activeTrade = null;
+        
+        for (let i = 50; i < candles.length; i++) {
+            const candle = candles[i];
+            const h = candles.slice(0, i+1);
+            const closes = h.map(c=>c.close);
+            
+            const emaFast = calculateEMA(closes, STRATEGY.EMA_FAST).pop();
+            const rsi = calculateRSI(closes, STRATEGY.RSI_PERIOD);
+            const atr = calculateATR(h.map(c=>c.high), h.map(c=>c.low), closes, STRATEGY.ATR_PERIOD);
+            const volSMA = calculateSMA(h.map(c=>c.volume), STRATEGY.VOL_MA_PERIOD);
+            
+            if (activeTrade) {
+                if (candle.low <= activeTrade.sl) {
+                    const lossAmt = (activeTrade.size * (activeTrade.entry - activeTrade.sl));
+                    balance -= lossAmt;
+                    trades.push({...activeTrade, exitPrice: activeTrade.sl, status: 'LOSS', exitTime: candle.time});
+                    activeTrade = null;
+                } else if (candle.high >= activeTrade.tp) {
+                    const winAmt = (activeTrade.size * (activeTrade.tp - activeTrade.entry));
+                    balance += winAmt;
+                    trades.push({...activeTrade, exitPrice: activeTrade.tp, status: 'WIN', exitTime: candle.time});
+                    activeTrade = null;
+                }
+                continue;
+            }
+
+            if (pendingOrder) {
+                if (candle.low <= pendingOrder.entry) { activeTrade = pendingOrder; pendingOrder = null; } 
+                else if ((candle.time - pendingOrder.timestamp/1000) > 3600) pendingOrder = null;
+            }
+
+            // Sim Strategy
+            const isGreen = candle.close > candle.open;
+            const bodySize = Math.abs(candle.close - candle.open);
+            const isBigBody = bodySize > atr * STRATEGY.JINGUO_BODY_SIZE; 
+            const isVolumeOk = candle.volume > volSMA * STRATEGY.VOL_MULTIPLIER;
+            const isTrendOk = candle.close > emaFast;
+            const isRsiOk = rsi >= STRATEGY.RSI_MIN && rsi <= STRATEGY.RSI_MAX;
+
+            if (!activeTrade && !pendingOrder && isGreen && isBigBody && isVolumeOk && isTrendOk && isRsiOk) {
+                const entry = candle.open + (bodySize * STRATEGY.RETRACE_RATIO);
+                const stop = candle.low - 0.5;
+                const risk = Math.abs(entry - stop);
+                const target = entry + (risk * STRATEGY.RISK_REWARD);
+                const riskAmt = capital * (riskPct / 100);
+                const size = Math.min(riskAmt / risk, (capital * leverage) / entry);
+                
+                pendingOrder = { entry, sl: stop, tp: target, size, timestamp: candle.time * 1000, type: 'BUY' };
+            }
+        }
+
+        const wins = trades.filter(t=>t.status==='WIN').length;
+        const losses = trades.filter(t=>t.status==='LOSS').length;
+        const total = wins + losses;
+        const wr = total > 0 ? ((wins/total)*100).toFixed(0) : 0;
+        const pnl = balance - capital;
+        
+        setBacktestResult({
+            totalTrades: total, winRate: wr, wins, losses, pnl: pnl.toFixed(2), finalBalance: balance.toFixed(2), period: (candles.length / 60).toFixed(1)
+        });
+        
+        const simHistory = trades.reverse().map(d => ({
+            status: d.status, price: d.entry.toFixed(2), exitPrice: d.exitPrice.toFixed(2),
+            exitTime: formatHKTime(d.exitTime),
+            time: formatHKTime(d.timestamp/1000),
+            entryTimeRaw: d.timestamp/1000, timestamp: d.timestamp
+        }));
+        setTradeHistory(simHistory);
+        setShowSettings(false); 
+    }, 100);
+  };
+
+  // --- Fetch & Realtime ---
   useEffect(() => {
     if(!supabase) return;
-    const fetchHistory = async () => {
+    const loadData = async () => {
         const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-        const { data, error } = await supabase
-            .from('trades')
-            .select('*')
-            .gte('entry_time', thirtyDaysAgo)
-            .order('entry_time', { ascending: false })
-            .limit(2000);
-
+        const { data } = await supabase.from('trades').select('*').gte('entry_time', thirtyDaysAgo).order('entry_time', { ascending: false }).limit(2000);
         if (data) {
             const mapped = data.map(d => ({
-                status: d.status,
-                price: d.entry_price,
-                exitPrice: d.exit_price,
+                status: d.status, price: d.entry_price, exitPrice: d.exit_price,
+                exitTime: d.exit_time ? new Date(d.exit_time).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit'}) : '-',
                 time: new Date(d.entry_time).toLocaleString('en-GB', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }),
-                entryTimeRaw: new Date(d.entry_time).getTime()/1000,
-                timestamp: new Date(d.entry_time).getTime()
+                entryTimeRaw: new Date(d.entry_time).getTime()/1000, timestamp: new Date(d.entry_time).getTime()
             }));
-            setTradeHistory(mapped);
+            setTradeHistory(mapped); 
         }
     };
-    fetchHistory();
-    const channel = supabase.channel('trades_realtime').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'trades' }, () => fetchHistory()).subscribe();
+    loadData();
+    const channel = supabase.channel('trades_live').on('postgres_changes', { event: '*', schema: 'public', table: 'trades' }, () => loadData()).subscribe();
     return () => { supabase.removeChannel(channel); };
   }, []);
 
@@ -124,24 +206,11 @@ export default function App() {
       });
   };
 
-//   const testDBConnection = async () => {
-//       if(!supabase) { alert("Supabase Client not initialized!"); return; }
-//       console.log("Testing DB connection...");
-//       const fakeSignal = { type: 'TEST ENTRY', status: 'TEST', entry_price: 2000.00, exit_price: 2005.00, tp: 2010, sl: 1990, entry_time: new Date().toISOString(), exit_time: new Date().toISOString() };
-//       const { data, error } = await supabase.from('trades').insert(fakeSignal).select();
-//       if (error) alert(`寫入失敗: ${error.message}`); else alert("寫入成功！數據庫連接正常。");
-//   };
-
-  // --- Marker Effect ---
   useEffect(() => {
       if(chartReady && candleSeriesRef.current && tradeHistory.length > 0) {
           try {
               const markers = tradeHistory.map(t => ({
-                  time: t.entryTimeRaw, 
-                  position: t.status === 'WIN' ? 'belowBar' : 'aboveBar',
-                  color: t.status === 'WIN' ? '#4ade80' : '#ef4444',
-                  shape: t.status === 'WIN' ? 'arrowUp' : 'arrowDown',
-                  text: t.status === 'WIN' ? 'WIN' : 'LOSS',
+                  time: t.entryTimeRaw, position: t.status === 'WIN' ? 'belowBar' : 'aboveBar', color: t.status === 'WIN' ? '#4ade80' : '#ef4444', shape: t.status === 'WIN' ? 'arrowUp' : 'arrowDown', text: t.status === 'WIN' ? 'WIN' : 'LOSS',
               }));
               markers.sort((a,b) => a.time - b.time);
               if (typeof candleSeriesRef.current.setMarkers === 'function') candleSeriesRef.current.setMarkers(markers);
@@ -161,7 +230,7 @@ export default function App() {
       return { low, high };
   };
 
-  // --- Chart Logic ---
+  // --- Chart & Strategy ---
   useEffect(() => {
     if (!chartContainerRef.current) return;
     if(chartInstanceRef.current) { chartInstanceRef.current.remove(); chartInstanceRef.current = null; }
@@ -171,31 +240,38 @@ export default function App() {
         grid: { vertLines: { color: '#18181b' }, horzLines: { color: '#18181b' } },
         width: chartContainerRef.current.clientWidth, height: chartContainerRef.current.clientHeight,
         localization: { timeFormatter: formatHKTime, dateFormat: 'yyyy-MM-dd' },
-        timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#27272a', rightOffset: 12, barSpacing: 10, fixLeftEdge: true, tickMarkFormatter: formatHKTime },
+        timeScale: { 
+            timeVisible: true, secondsVisible: false, borderColor: '#27272a', rightOffset: 12, barSpacing: 10, fixLeftEdge: true, tickMarkFormatter: formatHKTime,
+            shiftVisibleRangeOnNewBar: false // [V33] Prevent Force Scroll
+        },
         rightPriceScale: { borderColor: '#27272a', scaleMargins: { top: 0.1, bottom: 0.2 }, autoScale: true },
     });
     chartInstanceRef.current = chart;
     candleSeriesRef.current = chart.addSeries(CandlestickSeries, { upColor: '#22c55e', downColor: '#ef4444', wickUpColor: '#22c55e', wickDownColor: '#ef4444', borderVisible: false });
     volumeSeriesRef.current = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: '', color: '#eab308' });
     volumeSeriesRef.current.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-    emaSeriesRef.current = chart.addSeries(LineSeries, { color: '#fbbf24', lineWidth: 1, crosshairMarkerVisible: false, title: 'EMA(20)' });
+    emaFastSeriesRef.current = chart.addSeries(LineSeries, { color: '#fbbf24', lineWidth: 1, title: 'EMA(20)' });
+    emaSlowSeriesRef.current = chart.addSeries(LineSeries, { color: '#3b82f6', lineWidth: 1, lineStyle: 2, title: 'EMA(50)' });
 
     const initDataStream = async () => {
         try {
-            const res = await fetch('https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=500');
+            const res = await fetch('https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=1000');
             const raw = await res.json();
             const hist = raw.map(d => ({ time: d[0]/1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5]) }));
             candlesRef.current = hist;
             if(candleSeriesRef.current) { candleSeriesRef.current.setData(hist); setChartReady(true); }
             if(volumeSeriesRef.current) volumeSeriesRef.current.setData(hist.map(d => ({ time: d.time, value: d.volume, color: d.close >= d.open ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)' })));
             
-            const emaData = calculateEMA(hist.map(d=>d.close), STRATEGY.EMA_PERIOD);
-            if(emaSeriesRef.current) emaSeriesRef.current.setData(hist.map((d,i)=>({time:d.time, value:emaData[i]})).filter(d=>d.value!=null));
+            const closes = hist.map(d=>d.close);
+            const emaFast = calculateEMA(closes, STRATEGY.EMA_FAST);
+            const emaSlow = calculateEMA(closes, STRATEGY.EMA_SLOW);
+            if(emaFastSeriesRef.current) emaFastSeriesRef.current.setData(hist.map((d,i)=>({time:d.time, value:emaFast[i]})).filter(d=>d.value!=null));
+            if(emaSlowSeriesRef.current) emaSlowSeriesRef.current.setData(hist.map((d,i)=>({time:d.time, value:emaSlow[i]})).filter(d=>d.value!=null));
+            
             updateSupportResistance(candleSeriesRef.current, hist);
             setConnectionStatus('ONLINE');
-
             const now = hist[hist.length-1].time;
-            chart.timeScale().setVisibleRange({ from: now - (STRATEGY.DEFAULT_ZOOM_HOURS * 3600), to: now + (10 * 60) });
+            chart.timeScale().setVisibleRange({ from: now - (CONFIG.DEFAULT_ZOOM_HOURS * 3600), to: now + (10 * 60) });
 
             const ws = new WebSocket('wss://stream.binance.com:9443/ws/paxgusdt@kline_1m');
             ws.onmessage = (e) => {
@@ -211,98 +287,70 @@ export default function App() {
                 candlesRef.current = ch;
                 
                 const closes = ch.map(c=>c.close);
-                const fullEMA = calculateEMA(closes, STRATEGY.EMA_PERIOD);
-                const curEMA = fullEMA[fullEMA.length-1];
-                if (curEMA && emaSeriesRef.current) emaSeriesRef.current.update({time:candle.time, value:curEMA});
+                const fullEmaFast = calculateEMA(closes, STRATEGY.EMA_FAST);
+                const fullEmaSlow = calculateEMA(closes, STRATEGY.EMA_SLOW);
+                const curEmaFast = fullEmaFast[fullEmaFast.length-1];
+                const curEmaSlow = fullEmaSlow[fullEmaSlow.length-1];
+                if (curEmaFast && emaFastSeriesRef.current) emaFastSeriesRef.current.update({time:candle.time, value:curEmaFast});
+                if (curEmaSlow && emaSlowSeriesRef.current) emaSlowSeriesRef.current.update({time:candle.time, value:curEmaSlow});
+                
                 const srLevels = updateSupportResistance(candleSeriesRef.current, ch);
                 const rsi = calculateRSI(closes, STRATEGY.RSI_PERIOD);
+                const atr = calculateATR(ch.map(c=>c.high), ch.map(c=>c.low), closes, STRATEGY.ATR_PERIOD);
                 const volSMA = calculateSMA(h.map(c=>c.volume), STRATEGY.VOL_MA_PERIOD);
                 const volFactor = (candle.volume/(volSMA||1)).toFixed(2);
-                const macd = calculateMACD(closes, STRATEGY.MACD_FAST, STRATEGY.MACD_SLOW, STRATEGY.MACD_SIGNAL);
-                const atr = calculateATR(ch.map(c=>c.high), ch.map(c=>c.low), closes, STRATEGY.ATR_PERIOD);
+                const adx = calculateADX(ch.map(c=>c.high), ch.map(c=>c.low), closes, STRATEGY.ADX_PERIOD);
 
-                setMarketData({ price: candle.close, rsi: rsi.toFixed(1), volFactor, ema: curEMA?curEMA.toFixed(2):0, macdHist: macd.hist, atr, support: srLevels?.low, resistance: srLevels?.high });
+                setMarketData({ price: candle.close, rsi: rsi.toFixed(1), adx: adx.toFixed(1), volFactor, emaFast: curEmaFast?curEmaFast.toFixed(2):0, emaSlow: curEmaSlow?curEmaSlow.toFixed(2):0, support: srLevels?.low, resistance: srLevels?.high });
 
-                if(chartInstanceRef.current) {
-                    const currentNow = candle.time;
-                    chartInstanceRef.current.timeScale().setVisibleRange({ from: currentNow - (STRATEGY.DEFAULT_ZOOM_HOURS * 3600), to: currentNow + (10 * 60) });
-                }
-
-                // --- 🎯 V28.0 JINGUO STRATEGY ENGINE 🎯 ---
-                
-                // 1. 定義「金果 K 線」條件
-                const isGreen = candle.close > candle.open;
-                const bodySize = Math.abs(candle.close - candle.open);
-                const isBigBody = bodySize > atr * STRATEGY.JINGUO_BODY_SIZE; // 實體要夠大
-                const isVolumeOk = candle.volume > volSMA * STRATEGY.VOL_MULTIPLIER; // 要有量
-                const isTrendOk = candle.close > curEMA; // 要在均線之上
-                const isRsiOk = rsi >= STRATEGY.RSI_MIN && rsi <= STRATEGY.RSI_MAX; // RSI 健康區間
-
-                // 2. 計算 Jinguo Setup 數值
-                const jinguoEntry = (candle.open + (bodySize * STRATEGY.RETRACE_RATIO)); // 50% 回調位
-                const jinguoStop = candle.low - 0.5; // 結構性止損 (K線低點)
-                const riskPerShare = jinguoEntry - jinguoStop;
-                const jinguoTarget = jinguoEntry + (riskPerShare * STRATEGY.RISK_REWARD); // 1:1.5 盈虧比
-
-                // 3. 監控現有交易
-                if (activeSignalRef.current) {
-                    const signal = activeSignalRef.current;
-                    const elapsedMin = (Date.now() - signal.timestamp) / 60000;
-                    
-                    // 注意：這裡是模擬回測邏輯。真實交易中，這裡會檢查是否成交了 Limit Order
-                    if (candle.high >= signal.tp) {
-                        recordTrade(signal, 'WIN', signal.tp, candle.time); setActiveSignal(null); activeSignalRef.current = null;
-                    } else if (candle.low <= signal.sl) {
-                        recordTrade(signal, 'LOSS', signal.sl, candle.time); setActiveSignal(null); activeSignalRef.current = null;
-                    } else if (elapsedMin > 60) { // 60分鐘沒成交/沒結果就撤單
-                        setActiveSignal(null); activeSignalRef.current = null;
+                // [V33 Smart Scroll]
+                if (chartInstanceRef.current) {
+                    const timeScale = chartInstanceRef.current.timeScale();
+                    const logicalRange = timeScale.getVisibleLogicalRange();
+                    if (logicalRange && (candlesRef.current.length - logicalRange.to) < 2) {
+                         timeScale.scrollToRealTime();
                     }
                 }
 
-                // 4. 計算倉位
+                // Strategy (Live)
+                const isGreen = candle.close > candle.open;
+                const bodySize = Math.abs(candle.close - candle.open);
+                const isBigBody = bodySize > atr * STRATEGY.JINGUO_BODY_SIZE; 
+                const isVolumeOk = candle.volume > volSMA * STRATEGY.VOL_MULTIPLIER; 
+                const isTrendOk = candle.close > curEmaFast; 
+                const isRsiOk = rsi >= STRATEGY.RSI_MIN && rsi <= STRATEGY.RSI_MAX; 
+
+                const jinguoEntry = (candle.open + (bodySize * STRATEGY.RETRACE_RATIO)); 
+                const jinguoStop = candle.low - 0.5;
+                const riskPerShare = jinguoEntry - jinguoStop;
+                const jinguoTarget = jinguoEntry + (riskPerShare * STRATEGY.RISK_REWARD);
+
+                if (activeSignalRef.current) {
+                    const signal = activeSignalRef.current;
+                    const elapsedMin = (Date.now() - signal.timestamp) / 60000;
+                    if (candle.high >= signal.tp) { recordTrade(signal, 'WIN', signal.tp, candle.time); setActiveSignal(null); activeSignalRef.current = null; }
+                    else if (candle.low <= signal.sl) { recordTrade(signal, 'LOSS', signal.sl, candle.time); setActiveSignal(null); activeSignalRef.current = null; }
+                    else if (elapsedMin > 60) { setActiveSignal(null); activeSignalRef.current = null; }
+                }
+
                 const calcSize = (entry, stop) => {
                     const riskAmt = capital * (riskPct / 100);
                     const risk = Math.abs(entry - stop);
                     if(risk === 0) return 0;
-                    const riskBased = riskAmt / risk;
-                    const walletBased = (capital * leverage) / entry;
-                    return Math.min(riskBased, walletBased).toFixed(4);
+                    return Math.min(riskAmt / risk, (capital * leverage) / entry).toFixed(4);
                 };
 
-                // 5. 生成提示與信號
-                let tip = "等待金果 K 線...";
-                let setup = null;
-
-                if (isGreen && isBigBody && isVolumeOk && isTrendOk && isRsiOk) {
-                    tip = "🔥 發現金果 K 線！等待回調...";
-                    setup = { 
-                        type: 'LIMIT BUY', 
-                        entry: jinguoEntry.toFixed(2), 
-                        target: jinguoTarget.toFixed(2), 
-                        stop: jinguoStop.toFixed(2), 
-                        size: calcSize(jinguoEntry, jinguoStop) 
-                    };
-
-                    // 當 K 線收盤確認 (k.x = true) 且沒有活躍訂單時，觸發信號
+                let tip = "監測中...", setup = null;
+                if (!isTrendOk) tip = "📉 價格低於 EMA20，觀望。";
+                else if (isGreen && isBigBody && isVolumeOk && isRsiOk) {
+                    tip = "🔥 實時信號！等待回調...";
+                    setup = { type: 'LIMIT BUY', entry: jinguoEntry.toFixed(2), target: jinguoTarget.toFixed(2), stop: jinguoStop.toFixed(2), size: calcSize(jinguoEntry, jinguoStop) };
                     if (k.x && !activeSignalRef.current) {
-                        const newSignal = { 
-                            type: '🔥 JINGUO SETUP', 
-                            variant: 'success', 
-                            price: jinguoEntry, // 掛單價
-                            time: formatHKTime(candle.time), 
-                            reason: `Body ${bodySize.toFixed(1)} > ATR`,
-                            tp: parseFloat(jinguoTarget.toFixed(2)), 
-                            sl: parseFloat(jinguoStop.toFixed(2)), 
-                            timestamp: Date.now(), 
-                            entryTimeRaw: candle.time
-                        };
-                        setActiveSignal(newSignal);
-                        activeSignalRef.current = newSignal;
+                        const signalTime = new Date().toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
+                        const newSignal = { type: '🔥 JINGUO LIVE', variant: 'success', price: jinguoEntry, time: formatHKTime(candle.time), created: signalTime, tp: parseFloat(jinguoTarget.toFixed(2)), sl: parseFloat(jinguoStop.toFixed(2)), timestamp: Date.now(), entryTimeRaw: candle.time };
+                        setActiveSignal(newSignal); activeSignalRef.current = newSignal;
                     }
-                } else if (!isTrendOk) {
-                    tip = "📉 趨勢偏弱，觀望中。";
-                }
-
+                } else { tip = "👀 趨勢向上，等待放量..."; }
                 setStrategyTip(tip);
                 setTradeSetup(setup);
             };
@@ -311,43 +359,31 @@ export default function App() {
     };
     const wsPromise = initDataStream();
     
-    const ro = new ResizeObserver(e => { 
-        if(e[0].contentRect && chartInstanceRef.current) { 
-            chartInstanceRef.current.applyOptions({ width:e[0].contentRect.width, height:e[0].contentRect.height }); 
-        }
-    });
+    const ro = new ResizeObserver(e => { if(e[0].contentRect && chartInstanceRef.current) chartInstanceRef.current.applyOptions({ width:e[0].contentRect.width, height:e[0].contentRect.height }); });
     ro.observe(chartContainerRef.current);
     return () => { setChartReady(false); wsPromise.then(w=>w&&w.close()); if(chartInstanceRef.current) chartInstanceRef.current.remove(); ro.disconnect(); chartInstanceRef.current=null; candleSeriesRef.current=null; };
   }, [capital, riskPct, leverage]);
 
-  // UI Variables
-  const rsiStat = (r) => r>=80 ? {c:'#ef4444',t:'⚠️ 超買'} : (r>=55 ? {c:'#4ade80',t:'🚀 強勢'} : {c:'#94a3b8',t:'⚪ 盤整'});
+  // UI
+  const rsiStat = (r) => r>=70 ? {c:'#ef4444',t:'⚠️ 高位'} : (r>=45 ? {c:'#4ade80',t:'🚀 健康'} : {c:'#94a3b8',t:'⚪ 弱勢'});
   const rs = rsiStat(marketData.rsi);
+  const adxStat = (a) => a>=25 ? {c:'#4ade80',t:'🔥 強勢'} : {c:'#71717a',t:'💤 盤整'};
+  const as = adxStat(marketData.adx);
   const riskAmt = (capital * (riskPct/100)).toFixed(0);
-  const buyingPower = (capital * leverage).toFixed(0); 
-
-  // Filter Logic (Fixed V27.1)
+  
   const filteredHistory = tradeHistory.filter(t => {
       if (!t.timestamp) return false;
       if (filterMode === 'preset') {
           if (presetPeriod === 0) return true;
           const elapsedMin = (Date.now() - t.timestamp) / (1000 * 60);
           return elapsedMin >= -1 && elapsedMin <= presetPeriod;
-      } else {
-          return t.timestamp >= customRange.start && t.timestamp <= customRange.end;
-      }
+      } else { return t.timestamp >= customRange.start && t.timestamp <= customRange.end; }
   });
   const wins = filteredHistory.filter(t => t.status === 'WIN').length;
   const losses = filteredHistory.filter(t => t.status === 'LOSS').length;
   const winRate = (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : 0;
-  const presets = [{ label: '30M', val: 30 }, { label: '1H', val: 60 }, { label: '4H', val: 240 }, { label: '1D', val: 1440 }, { label: 'All', val: 0 }];
-
-  const clearHistory = async () => {
-      if(!supabase) return;
-      if (window.confirm('確定要清除所有交易記錄？這會清空數據庫！')) {
-          await supabase.from('trades').delete().neq('id', 0); setTradeHistory([]);
-      }
-  };
+  const presets = [{ label: '1H', val: 60 }, { label: '4H', val: 240 }, { label: '24H', val: 1440 }, { label: 'All', val: 0 }];
+  const clearHistory = async () => { if(supabase && window.confirm('Clear all?')) { await supabase.from('trades').delete().neq('id', 0); setTradeHistory([]); } };
 
   const isMobile = window.innerWidth < 768;
   const styles = {
@@ -362,6 +398,15 @@ export default function App() {
       input: { background: '#000', border: '1px solid #3f3f46', color: '#fff', padding: '8px', borderRadius: '4px', marginLeft: '5px', width: '70px', fontSize: '1rem' },
       gridRow1: { display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: '8px', marginBottom: '8px', flexShrink: 0 },
       gridRow2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px', flexShrink: 0 },
+      
+      backtestPanel: {
+          background: 'linear-gradient(90deg, #172554 0%, #1e3a8a 100%)', // Deep Blue
+          padding: '12px 20px', borderRadius: '8px', marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid #3b82f6', boxShadow: '0 4px 15px rgba(59, 130, 246, 0.3)', flexWrap: 'wrap', gap: '10px', flexShrink: 0
+      },
+      btStat: { display:'flex', flexDirection:'column', alignItems:'center' },
+      btLabel: { fontSize: '0.7rem', color: '#93c5fd', textTransform:'uppercase', letterSpacing:'1px' },
+      btValue: { fontSize: '1.2rem', fontWeight: 'bold', color: '#fff' },
+      
       alertBox: { padding: '10px', borderRadius: '8px', marginBottom: '10px', fontWeight: 'bold', width: '100%', boxSizing: 'border-box', flexShrink: 0 },
       tipBar: { background: '#1e293b', borderLeft: '4px solid #3b82f6', padding: '8px 12px', borderRadius: '4px', fontSize: '0.85rem', color: '#94a3b8', marginBottom: isMobile ? '5px' : '0', flexGrow: 1, display: 'flex', alignItems: 'center' },
       setupBox: { background: '#18181b', border: '1px solid #27272a', borderRadius: '4px', padding: '8px 12px', flexGrow: 1.5 },
@@ -389,15 +434,14 @@ export default function App() {
       <div style={styles.header}>
         <div style={styles.statusDot} className={connectionStatus==='ONLINE'?'pulse':''}></div>
         <div style={{flexGrow:1}}>
-            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>JINGUO V28</span></h1>
+            <h1 style={styles.title}>JINGUO SCALPER <span style={styles.proBadge}>V33</span></h1>
             <p style={styles.subtitle}>PAXG/USDT • 1M • {supabase ? "DB OK" : "DB Missing"}</p>
         </div>
         <div style={{display:'flex', gap:'10px', marginRight:'5px', alignItems:'center'}}>
              <div onClick={()=>setShowHistory(!showHistory)} style={{cursor:'pointer', background:'#27272a', padding:'5px 10px', borderRadius:'4px', border:'1px solid #3f3f46', fontSize:'0.8rem', color:'#fff'}}>
-                 <span style={{color:winRate>=50?'#4ade80':'#ef4444', fontWeight:'bold'}}>{winRate}% ({wins}W)</span>
+                 <span style={{color:winRate>=60?'#4ade80':'#ef4444', fontWeight:'bold'}}>{winRate}% ({wins}W)</span>
              </div>
         </div>
-        {/* <button onClick={testDBConnection} style={{...styles.settingsBtn, background:'#3b82f6', fontSize:'0.8rem', padding:'6px'}}>Test</button> */}
         <button onClick={()=>setShowSettings(!showSettings)} style={styles.settingsBtn}>⚙️</button>
       </div>
 
@@ -407,6 +451,9 @@ export default function App() {
                   <label>本金: <input type="number" value={capital} onChange={e=>setCapital(Number(e.target.value))} style={styles.input} /></label>
                   <label>Risk%: <input type="number" value={riskPct} onChange={e=>setRiskPct(Number(e.target.value))} style={styles.input} /></label>
                   <label>槓桿: <input type="number" value={leverage} onChange={e=>setLeverage(Number(e.target.value))} style={styles.input} /></label>
+                  <button onClick={runBacktest} style={{background:'#3b82f6', color:'#fff', border:'none', padding:'5px 15px', borderRadius:'4px', cursor:'pointer', fontWeight:'bold', fontSize:'0.9rem', boxShadow:'0 0 10px rgba(59, 130, 246, 0.5)'}}>
+                    ▶ 立即回測
+                  </button>
                   <button onClick={clearHistory} style={{background:'#ef4444', color:'#fff', border:'none', padding:'5px 10px', borderRadius:'4px', cursor:'pointer', fontWeight:'bold'}}>Reset DB</button>
               </div>
           </div>
@@ -433,8 +480,14 @@ export default function App() {
               <div style={{maxHeight:'300px', overflowY:'auto'}}>
                   {filteredHistory.map((t, i) => (
                       <div key={i} style={{display:'flex', justifyContent:'space-between', fontSize:'0.85rem', padding:'8px 0', borderBottom:'1px solid #27272a'}}>
-                          <div><span style={{color:t.status==='WIN'?'#4ade80':'#ef4444', fontWeight:'bold', marginRight:'10px'}}>{t.status}</span><span style={{color:'#94a3b8'}}>{t.time}</span></div>
-                          <div style={{textAlign:'right', paddingRight:'15px'}}><div style={{color:'#fff'}}>{t.price}<span>, {t.exitPrice}</span></div></div>
+                          <div>
+                              <span style={{color:t.status==='WIN'?'#4ade80':'#ef4444', fontWeight:'bold', marginRight:'10px'}}>{t.status}</span>
+                              <span style={{color:'#94a3b8'}}>{t.time}</span>
+                          </div>
+                          <div style={{textAlign:'right'}}>
+                              <div style={{color:'#fff'}}>In: {t.price}</div>
+                              {t.exitPrice && <div style={{color:'#71717a', fontSize:'0.75rem'}}>Out: {t.exitPrice}</div>}
+                          </div>
                       </div>
                   ))}
               </div>
@@ -444,13 +497,27 @@ export default function App() {
       <div style={styles.gridRow1}>
         <StatCard label="現價" value={marketData.price.toFixed(2)} unit="$" color="#FFFFFF" isMain={true} />
         <StatCard label="RSI" value={marketData.rsi || 0} color={rs.c} sub={rs.t} />
-        <StatCard label="Vol" value={marketData.volFactor || "0.00"} unit="x" color={parseFloat(marketData.volFactor)>1.5?'#4ade80':'#94a3b8'} sub={parseFloat(marketData.volFactor)>STRATEGY.VOL_MULTIPLIER?"🔥":"💤"} />
-        <StatCard label="EMA" value={marketData.ema || 0} unit="$" color="#fbbf24" sub="Trend" />
+        <StatCard label="ADX" value={marketData.adx || 0} color={as.c} sub={as.t} />
+        <StatCard label="EMA(20)" value={marketData.emaFast || 0} unit="$" color="#fbbf24" sub={marketData.emaFast>marketData.emaSlow?"📈 Bull":"📉 Bear"} />
       </div>
       <div style={styles.gridRow2}>
         <StatCard label="支撐 (Low 50)" value={marketData.support?.toFixed(2) || "---"} unit="$" color="#22c55e" sub="Sup" />
         <StatCard label="阻力 (High 50)" value={marketData.resistance?.toFixed(2) || "---"} unit="$" color="#ef4444" sub="Res" />
       </div>
+
+      {/* Backtest Result Panel */}
+      {backtestResult && (
+          <div style={styles.backtestPanel}>
+              <div style={{display:'flex', alignItems:'center', gap:'15px', flexGrow:1, flexWrap:'wrap', justifyContent:'space-around'}}>
+                  <div style={styles.btStat}><span style={styles.btLabel}>SIM PERIOD</span><span style={styles.btValue}>{backtestResult.period}h</span></div>
+                  <div style={styles.btStat}><span style={styles.btLabel}>TOTAL TRADES</span><span style={styles.btValue}>{backtestResult.totalTrades}</span></div>
+                  <div style={styles.btStat}><span style={styles.btLabel}>WIN RATE</span><span style={{...styles.btValue, color: backtestResult.winRate>50?'#4ade80':'#ef4444'}}>{backtestResult.winRate}%</span></div>
+                  <div style={styles.btStat}><span style={styles.btLabel}>NET PNL</span><span style={{...styles.btValue, color: parseFloat(backtestResult.pnl)>0?'#4ade80':'#ef4444'}}>${backtestResult.pnl}</span></div>
+                  <div style={styles.btStat}><span style={styles.btLabel}>FINAL BAL</span><span style={{...styles.btValue, color:'#93c5fd'}}>${backtestResult.finalBalance}</span></div>
+              </div>
+              <button onClick={()=>{setBacktestResult(null); setTradeHistory([]);}} style={{...styles.closeBtn, background:'rgba(255,255,255,0.1)', color:'#fff'}}>✕</button>
+          </div>
+      )}
 
       {activeSignal && (
         <div style={{...styles.alertBox, background: '#4ade80'}}>
@@ -458,9 +525,10 @@ export default function App() {
                 <span style={{fontSize: '1.5rem'}}>🚀</span>
                 <div style={{flexGrow:1}}>
                     <div style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}>
-                        <strong style={{fontSize:'1.1rem',color:'#000'}}>JINGUO SIGNAL: {activeSignal.price}</strong>
+                        <strong style={{fontSize:'1.1rem',color:'#000'}}>SIGNAL: {activeSignal.price}</strong>
                         <button onClick={()=>{setActiveSignal(null); activeSignalRef.current=null;}} style={styles.closeBtn}>✕</button>
                     </div>
+                    <div style={{fontSize:'0.8rem', color:'#000', marginBottom:'5px'}}>Created: {activeSignal.created}</div>
                     <div style={{marginTop:'5px', paddingTop:'5px', borderTop:'1px solid rgba(0,0,0,0.1)', display:'flex', gap:'15px', fontSize:'0.95rem', color:'#000', fontWeight:'bold'}}>
                              <span>🎯 {activeSignal.tp}</span><span>🛑 {activeSignal.sl}</span>
                     </div>
