@@ -17,6 +17,30 @@ const supabase = window.supabase
 const STRATEGY = CONFIG.STRATEGY;
 
 // ---------- indicator helpers ----------
+// 風險管理：用 risk% + 槓桿 + hard cap 決定倉位
+const calcJinguoSize = ({
+  capital,
+  riskPct,
+  leverage,
+  entry,
+  stop,
+  hardSizeCap = 5,    // 每單最大 size，可之後做 UI
+}) => {
+  const riskAmt = capital * (riskPct / 100);          // 每單 dollar risk
+  const riskPerUnit = Math.abs(entry - stop) || 0.1;  // 防止除 0
+
+  const rawSize = riskAmt / riskPerUnit;
+  const maxSizeByLev = (capital * leverage) / entry;
+
+  const size = Math.min(rawSize, maxSizeByLev, hardSizeCap);
+
+  return {
+    size: Number(size.toFixed(4)),
+    riskAmt,
+    riskPerUnit,
+  };
+};
+
 const calculateSMA = (data, period) => {
   if (!data || data.length === 0) return 0;
   const slice = data.slice(-Math.min(data.length, period));
@@ -134,6 +158,7 @@ export default function App() {
   const resistanceLineRef = useRef(null);
   const activeSignalRef = useRef(null);
   const candlesRef = useRef([]); // 所有 K 線 (live + backtest 用)
+  const [supabaseBtResult, setSupabaseBtResult] = useState(null);
 
   // live 指標
   const [marketData, setMarketData] = useState({
@@ -322,121 +347,263 @@ export default function App() {
     return { low, high };
   };
 
+  const filterCandlesByPeriod = (candles, periodHours) => {
+  if (!candles || candles.length === 0) return [];
+  if (!periodHours || periodHours <= 0) return candles;
+
+  const lastTime = candles[candles.length - 1].time;
+  const fromTime = lastTime - periodHours * 3600;
+  return candles.filter((c) => c.time >= fromTime);
+};
+
   // ---------- 回測：只寫 backtestHistory ----------
-  const runBacktest = () => {
-    const candles = candlesRef.current;
-    if (!candles || candles.length < 100) return;
+const runBacktest = () => {
+  const all = candlesRef.current;
+  if (!all || all.length < 100) return;
 
-    let balance = capital;
-    let trades = [];
-    let pendingOrder = null;
-    let activeTrade = null;
+  // 用 periodHours 篩選
+  const usedCandles = filterCandlesByPeriod(all, CONFIG.BACKTEST_PERIOD_HOURS || 0);
+  if (!usedCandles || usedCandles.length < 100) return;
 
-    for (let i = 50; i < candles.length; i++) {
-      const candle = candles[i];
-      const h = candles.slice(0, i + 1);
-      const closes = h.map((c) => c.close);
-      const emaFast = calculateEMA(closes, STRATEGY.EMA_FAST).pop();
+  let balance = capital;
+  let trades = [];
+  let pendingOrder = null;
+  let activeTrade = null;
+  let equityPoints = [{ time: usedCandles[0].time, balance }];
 
-      if (activeTrade) {
-        if (candle.low <= activeTrade.sl) {
-          const lossAmt =
-            activeTrade.size * (activeTrade.entry - activeTrade.sl);
-          balance -= lossAmt;
-          trades.push({
-            ...activeTrade,
-            exitPrice: activeTrade.sl,
-            status: 'LOSS',
-            exitTime: candle.time,
-          });
-          activeTrade = null;
-        } else if (candle.high >= activeTrade.tp) {
-          const winAmt =
-            activeTrade.size * (activeTrade.tp - activeTrade.entry);
-          balance += winAmt;
-          trades.push({
-            ...activeTrade,
-            exitPrice: activeTrade.tp,
-            status: 'WIN',
-            exitTime: candle.time,
-          });
-          activeTrade = null;
-        }
-        continue;
+  for (let i = 50; i < usedCandles.length; i++) {
+    const candle = usedCandles[i];
+    const h = usedCandles.slice(0, i + 1);
+    const closes = h.map((c) => c.close);
+    const emaFast = calculateEMA(closes, STRATEGY.EMA_FAST).pop();
+
+    // 有持倉：先處理 TP / SL
+if (activeTrade) {
+  let closed = false;
+
+  // 先 check 止賺
+  if (candle.high >= activeTrade.tp) {
+    const exit = Math.max(activeTrade.tp, candle.high); // TP 用較高價
+    const profit = activeTrade.size * (exit - activeTrade.entry); // 正數
+    balance += profit;
+
+    trades.push({
+      ...activeTrade,
+      exitPrice: exit,
+      status: 'WIN',
+      exitTime: candle.time,
+      profit,
+      balanceAfter: balance,
+    });
+    equityPoints.push({ time: candle.time, balance });
+    activeTrade = null;
+    closed = true;
+  }
+  // 再 check 止損
+  else if (candle.low <= activeTrade.sl) {
+    const exit = Math.min(activeTrade.sl, candle.low); // SL 用較低價
+    const profit = activeTrade.size * (exit - activeTrade.entry); // 負數
+    balance += profit;
+
+    trades.push({
+      ...activeTrade,
+      exitPrice: exit,
+      status: 'LOSS',
+      exitTime: candle.time,
+      profit,
+      balanceAfter: balance,
+    });
+    equityPoints.push({ time: candle.time, balance });
+    activeTrade = null;
+    closed = true;
+  }
+
+  if (closed) continue;
+}
+
+
+    // 有掛單
+    if (pendingOrder) {
+      if (candle.low <= pendingOrder.entry) {
+        activeTrade = pendingOrder;
+        pendingOrder = null;
+      } else if (candle.time - pendingOrder.timestamp / 1000 > 3600) {
+        pendingOrder = null;
       }
-
-      if (pendingOrder) {
-        if (candle.low <= pendingOrder.entry) {
-          activeTrade = pendingOrder;
-          pendingOrder = null;
-        } else if (candle.time - pendingOrder.timestamp / 1000 > 3600) {
-          pendingOrder = null;
-        }
-        continue;
-      }
-
-      const isGreen = candle.close > candle.open;
-      const isAboveEma = candle.close > emaFast;
-      if (isGreen && isAboveEma) {
-        const atr = calculateATR(
-          h.map((c) => c.high),
-          h.map((c) => c.low),
-          closes,
-        );
-        const bodySize = Math.abs(candle.close - candle.open);
-        const entry = candle.open + bodySize * STRATEGY.RETRACE_RATIO;
-        const stop = candle.low - atr * 0.2;
-        const risk = Math.abs(entry - stop);
-        const target = entry + risk * STRATEGY.RISK_REWARD;
-        const riskAmt = capital * (riskPct / 100);
-        const size = Math.min(
-          riskAmt / risk,
-          (capital * leverage) / entry,
-        );
-        pendingOrder = {
-          entry,
-          sl: stop,
-          tp: target,
-          size,
-          timestamp: candle.time * 1000,
-          type: 'BUY',
-        };
-      }
+      continue;
     }
 
-    const wins = trades.filter((t) => t.status === 'WIN').length;
-    const losses = trades.filter((t) => t.status === 'LOSS').length;
-    const total = wins + losses;
-    const wr = total > 0 ? ((wins / total) * 100).toFixed(0) : 0;
-    const pnl = balance - capital;
+    // 新 signal
+    const isGreen = candle.close > candle.open;
+    const isAboveEma = candle.close > emaFast;
+    if (!isGreen || !isAboveEma) continue;
 
-    setBacktestResult({
-      totalTrades: total,
-      winRate: wr,
-      wins,
-      losses,
-      pnl: pnl.toFixed(2),
-      finalBalance: balance.toFixed(2),
-      period: (candles.length / 60).toFixed(1),
+    const atr = calculateATR(
+      h.map((c) => c.high),
+      h.map((c) => c.low),
+      closes,
+    );
+    const bodySize = Math.abs(candle.close - candle.open);
+    const entry = candle.open + bodySize * STRATEGY.RETRACE_RATIO;
+    const stop = candle.low - atr * 0.2;
+    const risk = Math.abs(entry - stop);
+    if (!risk || !Number.isFinite(risk)) continue;
+
+    const target = entry + risk * STRATEGY.RISK_REWARD;
+
+    // 用 JINGUO sizer：以當前 balance 計 size
+    const { size } = calcJinguoSize({
+      capital: balance,
+      riskPct,
+      leverage,
+      entry,
+      stop,
+      hardSizeCap: 5,
     });
 
-    const simHistory = trades
-      .slice()
-      .reverse()
-      .map((d) => ({
-        status: d.status,
-        price: d.entry.toFixed(2),
-        exitPrice: d.exitPrice.toFixed(2),
-        exitTime: formatHKTime(d.exitTime),
-        time: formatHKTime(d.timestamp / 1000),
-        entryTimeRaw: d.timestamp / 1000,
-        timestamp: d.timestamp,
-      }));
+    if (!size || size <= 0) continue;
 
-    setBacktestHistory(simHistory); // ✅ 只改 backtestHistory
-    setHistoryMode('backtest');     // 切去睇回測
-    setShowSettings(false);
-  };
+    pendingOrder = {
+      entry,
+      sl: stop,
+      tp: target,
+      size,
+      timestamp: candle.time * 1000,
+      type: 'BUY',
+    };
+  }
+
+  const wins = trades.filter((t) => t.status === 'WIN');
+const losses = trades.filter((t) => t.status === 'LOSS');
+
+const total = wins.length + losses.length;
+const winRate =
+  total > 0 ? ((wins.length / total) * 100).toFixed(1) : '0.0';
+
+const sumWin = wins.reduce(
+  (s, t) => s + t.size * (t.exitPrice - t.entry),
+  0,
+);
+const sumLoss = losses.reduce(
+  (s, t) => s + t.size * (t.exitPrice - t.entry),
+  0,
+); // 負數
+
+const avgWin = wins.length ? sumWin / wins.length : 0;
+const avgLoss = losses.length ? sumLoss / losses.length : 0;
+
+const pnl = balance - capital;
+const pnlPct =
+  capital > 0 ? ((pnl / capital) * 100).toFixed(1) : '0.0';
+
+const periodSeconds =
+  usedCandles[usedCandles.length - 1].time - usedCandles[0].time;
+const periodHrsReal = (periodSeconds / 3600).toFixed(1);
+
+const p = total > 0 ? wins.length / total : 0;
+const expectancy = p * avgWin + (1 - p) * avgLoss;
+
+setBacktestResult({
+  totalTrades: total,
+  wins: wins.length,
+  losses: losses.length,
+  winRate,
+  pnl: pnl.toFixed(2),
+  pnlPct,
+  finalBalance: balance.toFixed(2),
+  period: periodHrsReal,
+  avgWin: avgWin.toFixed(2),
+  avgLoss: avgLoss.toFixed(2),
+  expectancy: expectancy.toFixed(2),
+});
+
+
+  const simHistory = trades
+    .slice()
+    .reverse()
+    .map((d) => ({
+      status: d.status,
+      price: d.entry.toFixed(2),
+      exitPrice: d.exitPrice.toFixed(2),
+      size: d.size.toFixed(3),
+    profit: d.profit.toFixed(2),
+    balanceAfter: d.balanceAfter.toFixed(2),
+      exitTime: formatHKTime(d.exitTime),
+      time: formatHKTime(d.timestamp / 1000),
+      entryTimeRaw: d.timestamp / 1000,
+      timestamp: d.timestamp,
+    }));
+
+  setBacktestHistory(simHistory);
+  setHistoryMode('backtest');
+  setShowSettings(false);
+};
+
+    // 用 liveHistory / Supabase trades 做 backtest（重播實際成交）
+    // 假設 DB 記錄咗 entry_price / exit_price / entry_time / status
+    const runSupabaseBacktest = (initialCapital, riskPct) => {
+    if (!liveHistory || liveHistory.length === 0) return null;
+
+    // 按 entryTimeRaw 由舊到新排序
+    const trades = [...liveHistory]
+        .filter((t) => t.exitPrice && !isNaN(t.exitPrice))
+        .sort((a, b) => a.entryTimeRaw - b.entryTimeRaw);
+
+    if (trades.length === 0) return null;
+
+    let balance = initialCapital;
+    let equity = [{ time: trades[0].entryTimeRaw, balance }];
+    let winCount = 0;
+    let lossCount = 0;
+    let sumWin = 0;
+    let sumLoss = 0;
+
+    trades.forEach((t) => {
+        const entry = parseFloat(t.price);
+        const exit = parseFloat(t.exitPrice);
+        if (!entry || !exit) return;
+
+        // 沒有 SL 的情況，只能用固定 riskAmt / entry 當 size
+        const riskAmt = balance * (riskPct / 100);
+        // 粗略假設 riskPerUnit = entry * 0.003 (0.3%)，你之後可改為用 DB 的 SL
+        const riskPerUnit = entry * 0.003 || 1;
+        const size = riskAmt / riskPerUnit;
+
+        const profit = size * (exit - entry);
+        balance += profit;
+
+        const status = profit >= 0 ? 'WIN' : 'LOSS';
+        if (status === 'WIN') {
+        winCount++;
+        sumWin += profit;
+        } else {
+        lossCount++;
+        sumLoss += profit; // 負數
+        }
+
+        equity.push({ time: t.entryTimeRaw, balance });
+    });
+
+    const total = winCount + lossCount;
+    const winRate = total > 0 ? ((winCount / total) * 100).toFixed(1) : '0.0';
+    const avgWin = winCount ? sumWin / winCount : 0;
+    const avgLoss = lossCount ? sumLoss / lossCount : 0; // 負數
+    const p = total > 0 ? winCount / total : 0;
+    const expectancy = p * avgWin + (1 - p) * avgLoss;
+
+    return {
+        totalTrades: total,
+        wins: winCount,
+        losses: lossCount,
+        winRate,
+        pnl: (balance - initialCapital).toFixed(2),
+        finalBalance: balance.toFixed(2),
+        avgWin: avgWin.toFixed(2),
+        avgLoss: avgLoss.toFixed(2),
+        expectancy: expectancy.toFixed(2),
+        equity,
+    };
+    };
 
   // ---------- Chart + Realtime (只初始化一次) ----------
   useEffect(() => {
@@ -639,15 +806,17 @@ export default function App() {
           const isGreen = candle.close > candle.open;
           const isAboveEma = curEmaFast && candle.close > curEmaFast;
 
-          const calcSize = (entry, stop) => {
-            const riskAmt = capital * (riskPct / 100);
-            const risk = Math.abs(entry - stop);
-            if (!risk) return 0;
-            return Math.min(
-              riskAmt / risk,
-              (capital * leverage) / entry,
-            ).toFixed(4);
-          };
+         const calcSize = (entry, stop) => {
+        const { size } = calcJinguoSize({
+            capital,
+            riskPct,
+            leverage,
+            entry,
+            stop,
+            hardSizeCap: 5,
+        });
+        return size.toFixed(4);
+        };
 
           let tip = '監測中...', setup = null;
 
@@ -944,19 +1113,21 @@ export default function App() {
       fontSize: '1.2rem',
     },
     historyPanel: {
-      position: 'absolute',
-      top: isMobile ? 60 : 80,
-      right: isMobile ? 10 : 20,
-      left: isMobile ? 10 : 'auto',
-      width: isMobile ? 'auto' : 320,
-      background: '#18181b',
-      border: '1px solid #3f3f46',
-      borderRadius: 8,
-      padding: 15,
-      zIndex: 100,
-      boxShadow: '0 10px 30px rgba(0,0,0,0.8)',
-      maxHeight: '60vh',
-    },
+        position: 'absolute',
+        top: isMobile ? 60 : 70,
+        right: isMobile ? 10 : 20,
+        bottom: isMobile ? 10 : 20,
+        width: isMobile ? 'calc(100% - 20px)' : 420,   // 由 320 -> 420
+        background: '#18181b',
+        border: '1px solid #3f3f46',
+        borderRadius: 8,
+        padding: 15,
+        zIndex: 100,
+        boxShadow: '0 10px 30px rgba(0,0,0,0.8)',
+        maxHeight: 'none',                              // 改用 bottom 控制高度
+        display: 'flex',
+        flexDirection: 'column',
+        },
     filterBtn: {
       background: 'transparent',
       color: '#71717a',
@@ -1140,31 +1311,42 @@ export default function App() {
               }}
             >
               <strong>
-                交易記錄 ({historyMode === 'live' ? 'LIVE' : 'BACKTEST'}) (
-                {historySource.length})
-              </strong>
-              <div>
-                <button
-                  onClick={() => setHistoryMode('live')}
-                  style={
-                    historyMode === 'live'
-                      ? styles.filterBtnActive
-                      : styles.filterBtn
-                  }
-                >
-                  Live
-                </button>
-                <button
-                  onClick={() => setHistoryMode('backtest')}
-                  style={
-                    historyMode === 'backtest'
-                      ? styles.filterBtnActive
-                      : styles.filterBtn
-                  }
-                >
-                  Backtest
-                </button>
-              </div>
+                    交易記錄 ({historyMode === 'live' ? 'LIVE' : 'BACKTEST'}) (
+                    {historySource.length})
+                    </strong>
+                    <div>
+                    <button
+                        onClick={() => setHistoryMode('live')}
+                        style={
+                        historyMode === 'live'
+                            ? styles.filterBtnActive
+                            : styles.filterBtn
+                        }
+                    >
+                        Live
+                    </button>
+                    <button
+                        onClick={() => setHistoryMode('backtest')}
+                        style={
+                        historyMode === 'backtest'
+                            ? styles.filterBtnActive
+                            : styles.filterBtn
+                        }
+                    >
+                        Backtest
+                    </button>
+                   <button
+                        onClick={() => {
+                            const res = runSupabaseBacktest(capital, riskPct);
+                            if (res) {
+                            setSupabaseBtResult(res);
+                            }
+                        }}
+                        style={styles.filterBtn}
+                        >
+                        Supabase Backtest
+                        </button>
+                    </div>
             </div>
 
             <button
@@ -1222,42 +1404,80 @@ export default function App() {
             )}
           </div>
 
-          <div style={{ maxHeight: 300, overflowY: 'auto' }}>
-            {filteredHistory.map((t, i) => (
-              <div
-                key={i}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  fontSize: '0.85rem',
-                  padding: '8px 0',
-                  borderBottom: '1px solid #27272a',
-                }}
-              >
-                <div>
-                  <span
-                    style={{
-                      color: t.status === 'WIN' ? '#4ade80' : '#ef4444',
-                      fontWeight: 'bold',
-                      marginRight: 10,
-                    }}
-                  >
-                    {t.status}
-                  </span>
-                  <span style={{ color: '#94a3b8' }}>{t.time}</span>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ color: '#fff' }}>In: {t.price}</div>
-                  {t.exitPrice && (
-                    <div
-                      style={{ color: '#71717a', fontSize: '0.75rem' }}
-                    >{`Out: ${t.exitPrice}`}</div>
-                  )}
-                </div>
-              </div>
-            ))}
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+  {filteredHistory.map((t, i) => (
+    <div
+      key={i}
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        fontSize: '0.9rem',
+        padding: '10px 0',
+        borderBottom: '1px solid #27272a',
+      }}
+    >
+      {/* 左邊：status + time + (backtest 額外資訊) */}
+      <div>
+        <span
+          style={{
+            color: t.status === 'WIN' ? '#4ade80' : '#ef4444',
+            fontWeight: 'bold',
+            marginRight: 10,
+          }}
+        >
+          {t.status}
+        </span>
+        <span style={{ color: '#94a3b8' }}>{t.time}</span>
+
+        {historyMode === 'backtest' && (
+          <div
+            style={{
+              color: '#9ca3af',
+              fontSize: '0.75rem',
+              marginTop: 2,
+            }}
+          >
+            Size: {t.size} · PnL:{' '}
+            <span
+              style={{
+                color: parseFloat(t.profit) >= 0 ? '#4ade80' : '#ef4444',
+                fontWeight: 'bold',
+              }}
+            >
+              {parseFloat(t.profit) >= 0 ? '+' : ''}
+              {t.profit}
+            </span>{' '}
+            · Bal: ${t.balanceAfter}
           </div>
-        </div>
+        )}
+        {supabaseBtResult && (
+                <div style={{ marginTop: 10, fontSize: '0.8rem', color: '#e5e7eb' }}>
+                    <div>
+                    Supabase Backtest – Trades: {supabaseBtResult.totalTrades},
+                    Win%: {supabaseBtResult.winRate}%, PnL: $
+                    {supabaseBtResult.pnl}
+                    </div>
+                    <div style={{ color: '#9ca3af' }}>
+                    AvgWin: {supabaseBtResult.avgWin}, AvgLoss: {supabaseBtResult.avgLoss},
+                    Expectancy/trade: {supabaseBtResult.expectancy}
+                    </div>
+                </div>
+                )}
+      </div>
+
+      {/* 右邊：入場 / 出場價，共用 */}
+      <div style={{ textAlign: 'right' }}>
+        <div style={{ color: '#fff' }}>In: {t.price}</div>
+        {t.exitPrice && (
+          <div style={{ color: '#71717a', fontSize: '0.8rem' }}>
+            Out: {t.exitPrice}
+          </div>
+        )}
+      </div>
+    </div>
+  ))}
+</div>
+</div>
       )}
 
       <div style={styles.gridRow1}>
@@ -1372,6 +1592,7 @@ export default function App() {
           >
             ✕
           </button>
+          
         </div>
       )}
 
