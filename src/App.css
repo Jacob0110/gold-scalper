@@ -1,61 +1,94 @@
-/* 根節點：全螢幕深色背景 */
-#root {
-  margin: 0;
-  padding: 0;
-  text-align: left;
-}
-
-/* 最外層容器：對應 App.jsx 的 app-root / app-inner */
-.app-root {
-  min-height: 100vh;
-  background-color: #020617; /* slate-950 */
-  color: #e5e7eb;            /* slate-200 */
+/* src/App.css */
+.app-container {
+  height: 100vh;
+  width: 100vw;
   display: flex;
-  justify-content: center;
-  align-items: flex-start;
+  flex-direction: column;
+  background-color: #09090b;
+  color: #e4e4e7;
   padding: 16px;
   box-sizing: border-box;
+  overflow: hidden; /* 防止整個頁面捲動 */
 }
 
-.app-inner {
+/* Header */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #27272a;
+  padding-bottom: 12px;
+  flex-shrink: 0;
+}
+
+/* Grid Layout */
+.stats-grid-row-1 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.stats-grid-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+/* Info Bar */
+.info-section {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+/* Chart Container - 關鍵修正 */
+.chart-wrapper {
+  flex: 1; /* 自動填滿剩餘高度 */
   width: 100%;
-  max-width: 1200px;
+  background-color: #000;
+  border: 1px solid #27272a;
+  border-radius: 8px;
+  position: relative;
+  overflow: hidden;
+  min-height: 400px; /* 強制最小高度，確保圖表一定有空間 */
+  display: flex; /* 確保內部 div 撐開 */
 }
 
-/* 基本排版 */
-body {
-  margin: 0;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  background-color: #020617;
-  color: #e5e7eb;
+.chart-inner {
+  width: 100%;
+  height: 100%;
 }
 
-/* Input 通用樣式 */
-input {
-  background-color: #020617;
-  color: #e5e7eb;
-  border: 1px solid #475569; /* slate-600 */
-  border-radius: 0.25rem;
-  padding: 0.25rem 0.5rem;
-  font-size: 0.875rem;
-  box-sizing: border-box;
+/* 卡片樣式 */
+.stat-card {
+  background: #18181b;
+  border: 1px solid #27272a;
+  padding: 12px;
+  border-radius: 8px;
 }
-
-input:focus {
-  outline: none;
-  border-color: #38bdf8; /* sky-400 */
-}
-
-/* Button 通用樣式 */
-button {
-  cursor: pointer;
-  border: none;
-  border-radius: 0.25rem;
+.stat-label {
   font-size: 0.75rem;
+  color: #a1a1aa;
+}
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: bold;
+  font-family: monospace;
+  color: #fff;
 }
 
-button:disabled {
-  opacity: 0.5;
-  cursor: default;
+/* RWD */
+@media (max-width: 768px) {
+  .stats-grid-row-1 {
+    grid-template-columns: 1fr 1fr;
+  }
+  .chart-wrapper {
+    min-height: 300px;
+  }
 }
