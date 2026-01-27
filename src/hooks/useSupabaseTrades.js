@@ -1,44 +1,51 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { CONFIG } from "../config";
 
-// 初始化或取得 Supabase Client 的 Helper
+// 用一個模組級變數來存 Client，確保只建立一次 (Singleton)
+let globalSupabaseClient = null;
+
 const getSupabaseClient = () => {
-  // Mock 機制：防止 SSR 或無 window 環境報錯，或當 Config 未設定時不讓程式崩潰
-  if (typeof window !== "undefined" && !window.supabase) {
-    window.supabase = {
-      createClient: () => ({
-        from: () => ({
-          select: () => Promise.resolve({ data: [] }),
-          delete: () => Promise.resolve({}),
-          insert: (data) => Promise.resolve({ data }),
-          gte: () => ({}),
-          order: () => ({}),
-          neq: () => ({}),
-        }),
-        channel: () => ({
-          on: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
-        }),
-        removeChannel: () => {},
-      }),
-    };
+  // 1. 如果已經有 Client，直接回傳 (解決 Multiple Instances 警告)
+  if (globalSupabaseClient) return globalSupabaseClient;
+
+  // 2. 檢查是否有 window.supabase (CDN 來源)
+  if (typeof window !== "undefined" && window.supabase) {
+    const { createClient } = window.supabase;
+    // 建立並存起來
+    globalSupabaseClient = createClient(
+      CONFIG.SUPABASE_URL,
+      CONFIG.SUPABASE_KEY
+    );
+    return globalSupabaseClient;
   }
 
-  const { createClient } = window.supabase || { createClient: () => null };
-  return window.supabase
-    ? createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY)
-    : null;
+  return null;
 };
 
 export const useSupabaseTrades = () => {
   const [liveHistory, setLiveHistory] = useState([]);
-  const [supabase] = useState(getSupabaseClient()); // 初始化一次，保持實例穩定
+  // 使用 useRef 來保持對 client 的引用，不觸發重渲染
+  const supabaseRef = useRef(getSupabaseClient());
+  const supabase = supabaseRef.current;
 
-  // 格式化數據的 Helper
   const mapTradeData = (d) => ({
     id: d.id,
     status: d.status,
     price: d.entry_price,
     exitPrice: d.exit_price,
+    positionSize: d.position_size || 0.01,
+    rawPnL: d.raw_pnl ? parseFloat(d.raw_pnl).toFixed(4) : "0",
+    netPnL: d.net_pnl ? parseFloat(d.net_pnl).toFixed(4) : "0",
+    costCommission: d.cost_commission
+      ? parseFloat(d.cost_commission).toFixed(4)
+      : "0",
+    costSlippage: d.cost_slippage
+      ? parseFloat(d.cost_slippage).toFixed(4)
+      : "0",
+    totalCost: d.total_cost ? parseFloat(d.total_cost).toFixed(4) : "0",
+    riskRewardRatio: d.risk_reward_ratio || "N/A",
+    tp: d.tp,
+    sl: d.sl,
     exitTime: d.exit_time
       ? new Date(d.exit_time).toLocaleTimeString("en-GB", {
           hour: "2-digit",
@@ -59,12 +66,10 @@ export const useSupabaseTrades = () => {
   useEffect(() => {
     if (!supabase) return;
 
-    // 1. 載入初始歷史記錄 (最近 30 天)
     const loadInitial = async () => {
       const since = new Date(
         Date.now() - 30 * 24 * 60 * 60 * 1000
       ).toISOString();
-
       const { data, error } = await supabase
         .from("trades")
         .select("*")
@@ -72,14 +77,11 @@ export const useSupabaseTrades = () => {
         .order("entry_time", { ascending: false });
 
       if (error) console.error("Error loading trades:", error);
-      if (data) {
-        setLiveHistory(data.map(mapTradeData));
-      }
+      if (data) setLiveHistory(data.map(mapTradeData));
     };
 
     loadInitial();
 
-    // 2. 建立即時監聽 (Realtime Subscription)
     const channel = supabase
       .channel("trades_live")
       .on(
@@ -95,31 +97,75 @@ export const useSupabaseTrades = () => {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase]);
+  }, []); // 依賴為空，只執行一次
 
-  // ✅ 關鍵修正：使用 useCallback 包裹，防止函數重建導致 App.jsx 的 Effect 重跑
+  // ✅ 核心修復：recordTrade
   const recordTrade = useCallback(
     async (signal, status, exitPrice, candleTime) => {
-      if (!supabase) return;
+      if (!supabase) {
+        console.error("Supabase client not initialized");
+        return;
+      }
+
       try {
-        await supabase.from("trades").insert({
+        const positionSize = signal.size || 0.01;
+        let rawPnL = 0,
+          netPnL = 0,
+          totalCost = 0,
+          totalCommission = 0,
+          slippage = 0;
+        let riskRewardRatio = "N/A";
+
+        // 只在有 exitPrice 時計算 PnL (Open Trade 時 exitPrice 為 null)
+        if (exitPrice !== null && exitPrice !== undefined) {
+          rawPnL = (exitPrice - signal.price) * positionSize;
+          const entryValue = signal.price * positionSize;
+          const exitValue = exitPrice * positionSize;
+          const COMMISSION_RATE = 0.001;
+          const SLIPPAGE_PER_TRADE = 0.5;
+          totalCommission = (entryValue + exitValue) * COMMISSION_RATE;
+          slippage = SLIPPAGE_PER_TRADE;
+          totalCost = totalCommission + slippage;
+          netPnL = rawPnL - totalCost;
+          const riskAmount = Math.abs(signal.price - signal.sl);
+          const rewardAmount = Math.abs(signal.tp - signal.price);
+          riskRewardRatio =
+            riskAmount > 0 ? (rewardAmount / riskAmount).toFixed(2) : "N/A";
+        }
+
+        const payload = {
           type: signal.type,
           status,
           entry_price: signal.price,
-          exit_price: exitPrice,
+          exit_price: exitPrice, // Open 時為 null
+          position_size: positionSize,
+          raw_pnl: rawPnL.toFixed(4),
+          net_pnl: netPnL.toFixed(4),
+          total_cost: totalCost.toFixed(4),
+          cost_commission: totalCommission.toFixed(4),
+          cost_slippage: slippage,
           tp: signal.tp,
           sl: signal.sl,
+          risk_reward_ratio: riskRewardRatio,
           entry_time: new Date(signal.timestamp).toISOString(),
           exit_time: new Date(candleTime * 1000).toISOString(),
-        });
+        };
+
+        console.log("Submitting Trade Payload:", payload);
+        const { error } = await supabase.from("trades").insert(payload);
+
+        if (error) {
+          console.error("Supabase Write Error:", error.message, error.details);
+        } else {
+          console.log(`Trade [${status}] recorded successfully.`);
+        }
       } catch (e) {
-        console.error("Failed to record trade:", e);
+        console.error("System Error in recordTrade:", e);
       }
     },
-    [supabase]
-  ); // 依賴 supabase (它不會變)
+    []
+  );
 
-  // ✅ 關鍵修正：使用 useCallback 包裹
   const clearHistory = useCallback(async () => {
     if (!supabase) return;
     if (!window.confirm("清空所有 live 記錄?")) return;
@@ -129,13 +175,7 @@ export const useSupabaseTrades = () => {
     } catch (e) {
       console.error("Failed to clear history:", e);
     }
-  }, [supabase]);
+  }, []);
 
-  return {
-    supabase,
-    liveHistory,
-    setLiveHistory,
-    recordTrade,
-    clearHistory,
-  };
+  return { supabase, liveHistory, setLiveHistory, recordTrade, clearHistory };
 };

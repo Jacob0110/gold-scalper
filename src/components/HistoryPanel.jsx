@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { toInputFormat } from "../utils/formatters";
+import { calculateTradeMetrics } from "../utils/tradeAnalytics";
 
 export default function HistoryPanel({
   historyMode,
@@ -11,6 +12,7 @@ export default function HistoryPanel({
   setShowHistory,
   isMobile,
 }) {
+  const metrics = calculateTradeMetrics(historySource);
   const [filterMode, setFilterMode] = useState("preset");
   const [presetPeriod, setPresetPeriod] = useState(0);
   const [customRange, setCustomRange] = useState({
